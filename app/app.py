@@ -1,169 +1,160 @@
 """
-app.py
-------
-FastAPI application entry point for the ArtCaffe Brand Pipeline API.
+FastAPI service for Artcaffe brand pipeline.
+
+Aligned to the Lovable frontend's `jobs` table schema:
+  - columns: id, concept_id, agent_type, status, input_payload,
+             result, error_message, created_at, updated_at,
+             started_at, finished_at
+  - frontend filters jobs by agent_type = 'research'
 
 Endpoints:
-  POST /jobs          — enqueue a brand-guidelines processing job
-  GET  /jobs/{job_id} — check job status
-  GET  /health        — liveness probe
-
-The API validates the request, inserts a row into `jobs`, then immediately
-processes it in a BackgroundTask so the caller gets a job_id right away.
+  POST /brand-guidelines/process   (called by frontend serverFn)
+  POST /jobs                       (legacy/test: create + run)
+  GET  /jobs/{job_id}              (status poll)
+  GET  /healthz
 """
-
 from __future__ import annotations
 
 import os
 import uuid
-from contextlib import asynccontextmanager
-from typing import Any, Optional
+from datetime import datetime, timezone
+from typing import Optional
 
-from anthropic import Anthropic
-from fastapi import BackgroundTasks, FastAPI, HTTPException, status
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 from supabase import Client, create_client
 
 from job_runner import run_job
 
-# ---------- env / singletons ----------
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-BRAND_BUCKET = os.environ.get("BRAND_BUCKET", "brand-guidelines")
-BRAND_MODEL = os.environ.get("BRAND_MODEL", "claude-sonnet-4-20250514")
+API_KEY = os.environ.get("FASTAPI_API_KEY")  # shared with Lovable serverFn
 
-_sb: Optional[Client] = None
-_anthropic: Optional[Anthropic] = None
+sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+app = FastAPI(title="Artcaffe Brand API", version="2.0")
 
 
-def get_sb() -> Client:
-    global _sb
-    if _sb is None:
-        _sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-    return _sb
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
+def require_api_key(x_api_key: Optional[str] = Header(None)) -> None:
+    if not API_KEY:
+        return  # auth disabled
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
 
 
-def get_anthropic() -> Anthropic:
-    global _anthropic
-    if _anthropic is None:
-        _anthropic = Anthropic(api_key=ANTHROPIC_API_KEY)
-    return _anthropic
+# ---------------------------------------------------------------------------
+# Schemas
+# ---------------------------------------------------------------------------
+class ProcessRequest(BaseModel):
+    """Body posted by the Lovable serverFn notifyBrandGuidelines."""
+    task: str = "extract_brand_context"
+    concept_id: str
+    file_path: str
+    file_name: str
+    mime_type: str
+    job_id: Optional[str] = None  # frontend pre-created the row
 
 
-# ---------- lifespan ----------
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Warm up connections on startup
-    get_sb()
-    get_anthropic()
-    yield
-
-
-# ---------- app ----------
-app = FastAPI(
-    title="ArtCaffe Brand Pipeline API",
-    version="1.0.0",
-    lifespan=lifespan,
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# ---------- schemas ----------
 class CreateJobRequest(BaseModel):
-    concept_id: str = Field(..., description="UUID of the concept")
-    file_path: str = Field(..., description="Storage path within the brand-guidelines bucket")
-    file_name: str = Field(default="", description="Original filename (used for extension detection)")
-    mime_type: str = Field(default="", description="MIME type of the uploaded file")
+    concept_id: str
+    file_path: str
+    file_name: str
+    mime_type: str = "application/pdf"
 
 
-class JobResponse(BaseModel):
-    job_id: str
+class JobOut(BaseModel):
+    id: str
+    concept_id: str
+    agent_type: str
     status: str
-    task: str
-    concept_id: Optional[str]
-    result: Optional[dict[str, Any]]
-    error: Optional[str]
-    queued_at: Optional[str]
-    started_at: Optional[str]
-    finished_at: Optional[str]
+    result: Optional[dict] = None
+    error_message: Optional[str] = None
+    created_at: Optional[str] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
 
 
-# ---------- routes ----------
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-@app.post("/jobs", status_code=status.HTTP_202_ACCEPTED, response_model=JobResponse)
-def create_job(req: CreateJobRequest, background_tasks: BackgroundTasks):
-    sb = get_sb()
-    job_id = str(uuid.uuid4())
+def _fetch_job(job_id: str) -> dict:
+    res = (
+        sb.table("jobs")
+        .select("id,concept_id,agent_type,status,result,error_message,"
+                "created_at,started_at,finished_at")
+        .eq("id", job_id)
+        .single()
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(404, "Job not found")
+    return res.data
 
-    # Insert the job row
-    res = sb.table("jobs").insert({
-        "id": job_id,
-        "task": "brand_guidelines.process",
-        "status": "pending",
+
+def _insert_job(req: CreateJobRequest) -> dict:
+    row = {
+        "id": str(uuid.uuid4()),
         "concept_id": req.concept_id,
-        "payload": {
+        "agent_type": "research",
+        "status": "pending",
+        "input_payload": {
+            "task": "extract_brand_context",
             "file_path": req.file_path,
             "file_name": req.file_name,
             "mime_type": req.mime_type,
         },
-    }).execute()
-
-    if not res.data:
-        raise HTTPException(status_code=500, detail="Failed to create job")
-
-    job = res.data[0]
-
-    # Process in the background immediately
-    background_tasks.add_task(
-        run_job,
-        sb,
-        get_anthropic(),
-        bucket=BRAND_BUCKET,
-        model=BRAND_MODEL,
-        job_id=job_id,
-    )
-
-    return JobResponse(
-        job_id=job["id"],
-        status=job["status"],
-        task=job["task"],
-        concept_id=job.get("concept_id"),
-        result=job.get("result"),
-        error=job.get("error"),
-        queued_at=job.get("queued_at") or job.get("created_at"),
-        started_at=job.get("started_at"),
-        finished_at=job.get("finished_at"),
-    )
+        "created_at": _now(),
+    }
+    sb.table("jobs").insert(row).execute()
+    return _fetch_job(row["id"])
 
 
-@app.get("/jobs/{job_id}", response_model=JobResponse)
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+@app.get("/healthz")
+def healthz():
+    return {"ok": True, "ts": _now()}
+
+
+@app.post("/brand-guidelines/process", dependencies=[Depends(require_api_key)])
+def brand_guidelines_process(req: ProcessRequest, bg: BackgroundTasks):
+    """
+    Called by the Lovable frontend after it uploads to Storage and inserts
+    a `jobs` row. We process the existing row in-place (no duplicate insert).
+    If job_id is missing (manual curl), we create a new row.
+    """
+    if req.job_id:
+        job = _fetch_job(req.job_id)
+    else:
+        job = _insert_job(CreateJobRequest(
+            concept_id=req.concept_id,
+            file_path=req.file_path,
+            file_name=req.file_name,
+            mime_type=req.mime_type,
+        ))
+
+    bg.add_task(run_job, job["id"])
+    return {"ok": True, "job_id": job["id"], "status": "queued"}
+
+
+@app.post("/jobs", response_model=JobOut, dependencies=[Depends(require_api_key)])
+def create_job(req: CreateJobRequest, bg: BackgroundTasks):
+    """Legacy/test endpoint: create a job row and process it inline."""
+    job = _insert_job(req)
+    bg.add_task(run_job, job["id"])
+    return job
+
+
+@app.get("/jobs/{job_id}", response_model=JobOut)
 def get_job(job_id: str):
-    sb = get_sb()
-    res = sb.table("jobs").select("*").eq("id", job_id).limit(1).execute()
-    if not res.data:
-        raise HTTPException(status_code=404, detail="Job not found")
-    job = res.data[0]
-    return JobResponse(
-        job_id=job["id"],
-        status=job["status"],
-        task=job["task"],
-        concept_id=job.get("concept_id"),
-        result=job.get("result"),
-        error=job.get("error"),
-        queued_at=job.get("queued_at") or job.get("created_at"),
-        started_at=job.get("started_at"),
-        finished_at=job.get("finished_at"),
-    )
+    return _fetch_job(job_id)
