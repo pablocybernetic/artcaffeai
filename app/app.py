@@ -19,6 +19,8 @@ import os
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
+from job_runner import run_job
+from data_routes import router as data_router   # ← ADD
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -35,6 +37,10 @@ API_KEY = os.environ.get("FASTAPI_API_KEY")  # shared with Lovable serverFn
 
 sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 app = FastAPI(title="Artcaffe Brand API", version="2.0")
+
+sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+app = FastAPI(title="Artcaffe Brand API", version="2.0")
+app.include_router(data_router)                  # ← ADD
 
 
 # ---------------------------------------------------------------------------
