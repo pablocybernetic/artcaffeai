@@ -1,0 +1,30 @@
+# Exit nano first (Ctrl+X), then:
+
+# Fix the service file with correct paths
+sudo tee /etc/systemd/system/artcaffe-api.service > /dev/null << 'EOF'
+[Unit]
+Description=ArtCaffe Brand Pipeline API
+After=network.target
+
+[Service]
+Type=simple
+User=marketing
+WorkingDirectory=/home/marketing/artcaffeai/app
+EnvironmentFile=/home/marketing/artcaffeai/.env
+ExecStart=/home/marketing/artcaffeai/venv/bin/uvicorn app:app --host 0.0.0.0 --port 8080 --workers 2 --log-level info
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Reload and restart
+sudo systemctl daemon-reload
+sudo systemctl restart artcaffe-api
+
+# Check it worked
+sudo journalctl -u artcaffe-api -n 20 --no-pager
+curl http://127.0.0.1:8080/health

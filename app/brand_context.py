@@ -65,7 +65,7 @@ def insert_active(
                 "version": version,
                 "is_active": True,
                 "source_file_path": source_file_path,
-                "content": content,
+                "context_json": content,
             }
         )
         .execute()
