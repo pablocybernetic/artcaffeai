@@ -1,0 +1,25 @@
+[Unit]
+Description=ArtCaffe Brand Pipeline Job Runner (Standalone Poller)
+After=network.target
+# Only enable this unit if you want the job runner decoupled from the API.
+# When using FastAPI BackgroundTasks, this service is NOT needed.
+
+[Service]
+Type=simple
+User=artcaffe
+WorkingDirectory=/opt/artcaffe/app
+EnvironmentFile=/opt/artcaffe/.env
+
+ExecStart=/opt/artcaffe/venv/bin/python job_runner.py
+
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=artcaffe-worker
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

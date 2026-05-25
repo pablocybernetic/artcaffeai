@@ -1,0 +1,28 @@
+[Unit]
+Description=ArtCaffe Brand Pipeline API
+After=network.target
+
+[Service]
+Type=simple
+User=artcaffe
+WorkingDirectory=/opt/artcaffe/app
+EnvironmentFile=/opt/artcaffe/.env
+
+ExecStart=/opt/artcaffe/venv/bin/uvicorn app:app \
+    --host ${API_HOST:-0.0.0.0} \
+    --port ${API_PORT:-8000} \
+    --workers ${API_WORKERS:-2} \
+    --log-level info
+
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=artcaffe-api
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
