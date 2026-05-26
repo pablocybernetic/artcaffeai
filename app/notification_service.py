@@ -4,7 +4,7 @@ notification_service.py
 Lightweight notification layer for the Artcaffe AI Marketing System.
 
 Responsibilities:
-  - Insert a row into the `notifications` table (always).
+  - Insert a row into the `agent_notifications` table (always).
   - Optionally send an email via the Resend API (if RESEND_API_KEY is set).
 
 Env vars:
@@ -46,7 +46,7 @@ def send_notification(
     Returns True if the email was sent successfully, False otherwise
     (including when email is disabled because RESEND_API_KEY is not set).
     """
-    # Always persist to the notifications table
+    # Always persist to the agent_notifications table
     notif_row: dict[str, Any] = {
         "id": str(uuid.uuid4()),
         "user_id": user_id,
@@ -54,7 +54,7 @@ def send_notification(
         "payload": payload or {},
         "created_at": _now(),
     }
-    insert_res = sb.table("notifications").insert(notif_row).execute()
+    insert_res = sb.table("agent_notifications").insert(notif_row).execute()
     notif_id: Optional[str] = None
     if insert_res.data:
         notif_id = insert_res.data[0].get("id", notif_row["id"])
@@ -84,7 +84,7 @@ def send_notification(
         )
         # Mark sent_at on the notification row
         if notif_id:
-            sb.table("notifications").update(
+            sb.table("agent_notifications").update(
                 {"sent_at": _now()}
             ).eq("id", notif_id).execute()
 
