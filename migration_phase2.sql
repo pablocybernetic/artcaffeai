@@ -1,10 +1,13 @@
 -- ============================================================
--- Phase 2: AI Agents Schema Migration
+-- Phase 2: AI Agents Schema Migration (idempotent re-run safe)
 -- Run in Supabase SQL editor (Dashboard → SQL Editor → New query)
 -- ============================================================
 
--- 1. content_items — AI-generated ideas, drafts, and final copy
-CREATE TABLE IF NOT EXISTS public.content_items (
+-- 1. Drop and recreate content_items cleanly
+--    (safe: table is new and has no production data)
+DROP TABLE IF EXISTS public.content_items CASCADE;
+
+CREATE TABLE public.content_items (
   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   brief_id   UUID NOT NULL REFERENCES public.content_briefs(id) ON DELETE CASCADE,
   job_id     UUID,
@@ -25,7 +28,7 @@ CREATE TABLE IF NOT EXISTS public.content_items (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 2. agent_notifications — separate from any built-in Supabase notifications table
+-- 2. Agent notifications (separate from Supabase built-in notifications)
 CREATE TABLE IF NOT EXISTS public.agent_notifications (
   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   type       TEXT NOT NULL,
@@ -46,7 +49,11 @@ ALTER TABLE public.content_briefs
 ALTER TABLE public.content_items       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.agent_notifications ENABLE ROW LEVEL SECURITY;
 
--- Authenticated users can read and update content items
+-- Drop policies first so re-runs don't fail
+DROP POLICY IF EXISTS "auth_read_content_items"       ON public.content_items;
+DROP POLICY IF EXISTS "auth_update_content_items"     ON public.content_items;
+DROP POLICY IF EXISTS "auth_read_agent_notifications" ON public.agent_notifications;
+
 CREATE POLICY "auth_read_content_items"
   ON public.content_items FOR SELECT
   TO authenticated USING (true);
@@ -55,7 +62,6 @@ CREATE POLICY "auth_update_content_items"
   ON public.content_items FOR UPDATE
   TO authenticated USING (true);
 
--- Authenticated users can read all agent notifications
 CREATE POLICY "auth_read_agent_notifications"
   ON public.agent_notifications FOR SELECT
   TO authenticated USING (true);
