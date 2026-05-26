@@ -24,6 +24,7 @@ CREATE TABLE public.content_items (
   version    INT  NOT NULL DEFAULT 1,
   status     TEXT NOT NULL DEFAULT 'draft'
                CHECK (status IN ('draft', 'pending_review', 'approved', 'rejected')),
+  asset_ids  UUID[]       DEFAULT '{}',
   updated_at TIMESTAMPTZ DEFAULT NOW(),
   created_at TIMESTAMPTZ DEFAULT NOW()
 );

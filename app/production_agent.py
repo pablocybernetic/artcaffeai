@@ -37,13 +37,16 @@ Output ONLY a JSON object with this exact shape — no markdown fences, no extra
   "cta": "clear call-to-action phrase",
   "hashtags": ["#artcaffe", "#nairobi"],
   "alt_text": "accessibility alt text for the accompanying image",
-  "notes": "any production or scheduling notes for the content team"
+  "notes": "any production or scheduling notes for the content team",
+  "asset_ids": ["uuid-of-best-fit-asset"]
 }
 
 Rules:
 - Match the brand voice exactly — premium, warm, community-focused.
 - Copy must be ready to paste directly into the platform's composer.
 - Hashtags should be relevant, popular, and brand-appropriate.
+- For asset_ids: pick the 1 best asset UUID from AVAILABLE ASSETS that fits the final copy.
+  Use exact UUIDs only. If none fit, use [].
 - Return ONLY the JSON object — absolutely no text before or after it.\
 """
 
@@ -101,7 +104,29 @@ def run_production(
             "Approve the concept first before running the production agent."
         )
 
-    # 3. Brand context
+    # 3. Fetch available assets for the concept
+    assets_res = (
+        sb.table("assets")
+        .select("id,filename,asset_type,public_url,platform")
+        .eq("concept_id", concept_id)
+        .in_("asset_type", ["image", "video"])
+        .order("created_at", desc=True)
+        .limit(40)
+        .execute()
+    )
+    assets = assets_res.data or []
+    valid_asset_ids = {a["id"] for a in assets}
+
+    asset_section = ""
+    if assets:
+        lines = ["\nAVAILABLE ASSETS (pick 1 by exact UUID):"]
+        for a in assets:
+            name = a.get("filename") or "unnamed"
+            atype = a.get("asset_type") or "file"
+            lines.append(f"- {a['id']} | {atype} | {name}")
+        asset_section = "\n".join(lines) + "\n"
+
+    # 4. Brand context
     ctx = get_active(sb, concept_id)
     if not ctx:
         raise RuntimeError(
@@ -127,7 +152,9 @@ def run_production(
         + "\n\nAPPROVED CONCEPT (JSON):\n"
         + json.dumps(concept_details, indent=2)
         + f"\n\nTarget platform: {platform}"
+        + (asset_section or "")
         + "\n\nProduce the final publication-ready copy for this concept."
+        + (" Pick the best asset UUID from the list above." if assets else "")
     )
 
     # 5. Call Claude Opus
@@ -147,6 +174,10 @@ def run_production(
 
     channels = item.get("channels") or [platform]
 
+    # Validate picked asset IDs
+    raw_asset_ids = parsed.get("asset_ids") or []
+    asset_ids = [aid for aid in raw_asset_ids if aid in valid_asset_ids]
+
     # 7. Insert new content_items row (type="final")
     new_row = {
         "id": str(uuid.uuid4()),
@@ -159,6 +190,7 @@ def run_production(
         "caption": parsed.get("caption", ""),
         "body": parsed.get("body", ""),
         "channels": channels,
+        "asset_ids": asset_ids,
         "metadata": {
             "cta": parsed.get("cta", ""),
             "hashtags": parsed.get("hashtags", []),
