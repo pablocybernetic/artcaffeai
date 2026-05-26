@@ -94,43 +94,118 @@ def run_job(job_id: str) -> dict:
     if job["status"] not in ("pending", "running"):
         return {"ok": True, "skipped": True, "status": job["status"]}
 
-    if job.get("agent_type") != "research":
-        return {"ok": True, "skipped": True, "reason": "not_research"}
-
+    agent_type = job.get("agent_type")
     payload = job.get("input_payload") or {}
     concept_id = job["concept_id"]
 
-    try:
-        _mark_running(job_id)
-
-        result = run_pipeline(
-            sb=sb,
-            anthropic=anthropic_client,
-            bucket=BRAND_BUCKET,
-            model=ANTHROPIC_MODEL,
-            inp=PipelineInput(
-                concept_id=concept_id,
-                file_path=payload["file_path"],
-                file_name=payload.get("file_name", "guidelines.pdf"),
-                mime_type=payload.get("mime_type", "application/pdf"),
-            ),
-        )
-
-        result_dict = {
-            "brand_context_id": result.brand_context_id,
-            "version": result.version,
-            "chars_extracted": result.chars_extracted,
-        }
-        _mark_succeeded(job_id, result_dict)
-        return {"ok": True, "job_id": job_id, "result": result_dict}
-    except Exception as e:  # noqa: BLE001
-        err = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-        print(f"[job_runner] FAILED {job_id}: {err}", file=sys.stderr, flush=True)
+    # ------------------------------------------------------------------
+    # Research
+    # ------------------------------------------------------------------
+    if agent_type == "research":
         try:
-            _mark_failed(job_id, err)
-        except Exception:  # noqa: BLE001
-            pass
-        return {"ok": False, "job_id": job_id, "error": err}
+            _mark_running(job_id)
+
+            result = run_pipeline(
+                sb=sb,
+                anthropic=anthropic_client,
+                bucket=BRAND_BUCKET,
+                model=ANTHROPIC_MODEL,
+                inp=PipelineInput(
+                    concept_id=concept_id,
+                    file_path=payload["file_path"],
+                    file_name=payload.get("file_name", "guidelines.pdf"),
+                    mime_type=payload.get("mime_type", "application/pdf"),
+                ),
+            )
+
+            result_dict = {
+                "brand_context_id": result.brand_context_id,
+                "version": result.version,
+                "chars_extracted": result.chars_extracted,
+            }
+            _mark_succeeded(job_id, result_dict)
+            return {"ok": True, "job_id": job_id, "result": result_dict}
+        except Exception as e:  # noqa: BLE001
+            err = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            print(f"[job_runner] FAILED {job_id}: {err}", file=sys.stderr, flush=True)
+            try:
+                _mark_failed(job_id, err)
+            except Exception:  # noqa: BLE001
+                pass
+            return {"ok": False, "job_id": job_id, "error": err}
+
+    # ------------------------------------------------------------------
+    # Ideation
+    # ------------------------------------------------------------------
+    if agent_type == "ideation":
+        from ideation_agent import run_ideation  # noqa: PLC0415
+        from notification_service import notify_ideation_complete  # noqa: PLC0415
+
+        try:
+            _mark_running(job_id)
+
+            saved = run_ideation(
+                sb=sb,
+                anthropic=anthropic_client,
+                job_id=job_id,
+                brief_id=payload["brief_id"],
+                concept_id=concept_id,
+                n=payload.get("n", 5),
+            )
+            result_dict = {
+                "n_ideas": len(saved),
+                "item_ids": [s["id"] for s in saved],
+            }
+            _mark_succeeded(job_id, result_dict)
+            try:
+                notify_ideation_complete(sb, payload["brief_id"], len(saved))
+            except Exception:  # noqa: BLE001
+                pass
+            return {"ok": True, "job_id": job_id, "result": result_dict}
+        except Exception as e:  # noqa: BLE001
+            err = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            print(f"[job_runner] FAILED {job_id}: {err}", file=sys.stderr, flush=True)
+            try:
+                _mark_failed(job_id, err)
+            except Exception:  # noqa: BLE001
+                pass
+            return {"ok": False, "job_id": job_id, "error": err}
+
+    # ------------------------------------------------------------------
+    # Production
+    # ------------------------------------------------------------------
+    if agent_type == "production":
+        from production_agent import run_production  # noqa: PLC0415
+        from notification_service import notify_production_complete  # noqa: PLC0415
+
+        try:
+            _mark_running(job_id)
+
+            saved = run_production(
+                sb=sb,
+                anthropic=anthropic_client,
+                job_id=job_id,
+                content_item_id=payload["content_item_id"],
+                concept_id=concept_id,
+            )
+            result_dict = {"final_item_id": saved["id"]}
+            _mark_succeeded(job_id, result_dict)
+            try:
+                notify_production_complete(sb, saved.get("brief_id", ""))
+            except Exception:  # noqa: BLE001
+                pass
+            return {"ok": True, "job_id": job_id, "result": result_dict}
+        except Exception as e:  # noqa: BLE001
+            err = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            print(f"[job_runner] FAILED {job_id}: {err}", file=sys.stderr, flush=True)
+            try:
+                _mark_failed(job_id, err)
+            except Exception:  # noqa: BLE001
+                pass
+            return {"ok": False, "job_id": job_id, "error": err}
+
+    # Unknown agent type — skip
+    return {"ok": True, "skipped": True, "reason": f"unknown_agent_type:{agent_type}"}
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +216,7 @@ def _claim_next_pending() -> Optional[dict]:
         sb.table("jobs")
         .select("id")
         .eq("status", "pending")
-        .eq("agent_type", "research")
+        .in_("agent_type", ["research", "ideation", "production"])
         .order("created_at", desc=False)
         .limit(1)
         .execute()

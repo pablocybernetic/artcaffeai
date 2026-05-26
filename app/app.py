@@ -12,6 +12,12 @@ Endpoints:
   POST /jobs                       (legacy/test: create + run)
   GET  /jobs/{job_id}              (status poll)
   GET  /healthz
+  POST /agents/ideation            (ideation agent)
+  POST /agents/production          (production copy agent)
+  GET  /agents/items/{brief_id}    (list content items)
+  PATCH /agents/items/{item_id}    (approve/reject item)
+  POST /data/snapshot              (BigQuery snapshot)
+  POST /data/chat                  (data agent chat)
 """
 from __future__ import annotations
 
@@ -19,28 +25,38 @@ import os
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
-from job_runner import run_job
-from data_routes import router as data_router   # ← ADD
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
-from pydantic import BaseModel, Field
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from supabase import Client, create_client
 
 from job_runner import run_job
+from data_routes import router as data_router
+from agent_routes import router as agent_router
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-API_KEY = os.environ.get("FASTAPI_API_KEY")  # shared with Lovable serverFn
+API_KEY = os.environ.get("FASTAPI_API_KEY")
+
+CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",")]
 
 sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 app = FastAPI(title="Artcaffe Brand API", version="2.0")
 
-sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-app = FastAPI(title="Artcaffe Brand API", version="2.0")
-app.include_router(data_router)                  # ← ADD
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(data_router)
+app.include_router(agent_router)
 
 
 # ---------------------------------------------------------------------------
