@@ -359,11 +359,14 @@ def chat(req: ChatRequest):
         "You are the Artcaffe Data Agent. Answer questions about platform performance "
         "using ONLY the snapshot data provided below. Be concise and direct. "
         "If the data doesn't contain the answer, say so plainly.\n\n"
-        "When a chart would help, output it on its own line as:\n"
-        "CHART: {\"type\": \"bar|line|pie\", \"title\": \"...\", "
-        "\"data\": [{\"name\": \"label\", \"value\": 123}, ...]}\n"
-        "For multi-series charts add extra numeric keys: "
-        "{\"name\": \"Mon\", \"sessions\": 120, \"users\": 80}\n\n"
+        "CHART RULES — follow exactly:\n"
+        "- When a chart would help, place it on its own line starting with CHART: followed by a single-line JSON object.\n"
+        "- The JSON MUST be on ONE line — no newlines inside it.\n"
+        "- Required format: CHART: {\"type\":\"bar\",\"title\":\"My Title\",\"data\":[{\"name\":\"Label\",\"value\":123}]}\n"
+        "- Each data item is a flat object with a \"name\" string key and one or more numeric value keys.\n"
+        "- Multi-series example: CHART: {\"type\":\"bar\",\"title\":\"Sessions vs Users\",\"data\":[{\"name\":\"Mon\",\"sessions\":120,\"users\":80}]}\n"
+        "- NEVER use Chart.js format (labels/datasets arrays). ONLY the flat array format above.\n"
+        "- Output any CHART: line AFTER your text answer, not before.\n\n"
         f"SNAPSHOTS:\n{context_blob}"
     )
 
@@ -372,7 +375,7 @@ def chat(req: ChatRequest):
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     resp = client.messages.create(
         model="claude-haiku-4-5",
-        max_tokens=1024,
+        max_tokens=1500,
         system=system,
         messages=[{"role": m.role, "content": m.content} for m in req.messages],
     )
@@ -382,7 +385,8 @@ def chat(req: ChatRequest):
     if "CHART:" in text:
         head, _, tail = text.partition("CHART:")
         try:
-            chart = json.loads(tail.strip().splitlines()[0])
+            decoder = json.JSONDecoder()
+            chart, _ = decoder.raw_decode(tail.strip())
             text = head.strip()
         except Exception:  # noqa: BLE001
             pass
