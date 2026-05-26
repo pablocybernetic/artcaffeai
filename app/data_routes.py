@@ -372,7 +372,7 @@ def chat(req: ChatRequest):
 
     import anthropic  # type: ignore
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=25.0)
     resp = client.messages.create(
         model="claude-haiku-4-5",
         max_tokens=1500,
