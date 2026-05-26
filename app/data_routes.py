@@ -1,23 +1,19 @@
 """
 Data Agent routes for Artcaffe FastAPI service.
 
-Drop this file into /opt/artcaffe/app/ next to app.py, then in app.py add:
-
-    from data_routes import router as data_router
-    app.include_router(data_router)
-
 Endpoints:
-    POST /data/ga4/snapshot   -> pull last 7d GA4 metrics, upsert into
-                                 public.platform_data_snapshots
-    POST /data/chat           -> answer questions about a concept's snapshots
-                                 using Claude Haiku 4.5
+    POST /data/snapshot      -> pull last 7d metrics from BigQuery (GA4 + Google Ads),
+                                upsert into public.platform_data_snapshots
+    POST /data/chat          -> answer questions about snapshots using Claude Haiku 4.5
 
 Env vars required:
     SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY   (already set)
     FASTAPI_API_KEY                            (already set)
-    ANTHROPIC_API_KEY                          (new)
-    GA4_SERVICE_ACCOUNT_JSON                   (new — full JSON string)
-    GA4_PROPERTY_IDS                           (new — JSON: {"gastro_bar": "123456789", ...})
+    ANTHROPIC_API_KEY                          (already set)
+    BQ_SERVICE_ACCOUNT_JSON                    (full service account JSON string)
+    BQ_PROJECT_ID                              (default: my-first-project-416407)
+    BQ_GA4_DATASET                             (default: analytics_293507702)
+    BQ_GADS_DATASET                            (default: artcaffe_artcaffemarket_co_ke)
 """
 from __future__ import annotations
 
@@ -31,13 +27,17 @@ from pydantic import BaseModel, Field
 from supabase import Client, create_client
 
 # ---------------------------------------------------------------------------
-# Shared config (mirrors app.py)
+# Config
 # ---------------------------------------------------------------------------
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 API_KEY = os.environ.get("FASTAPI_API_KEY")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
-GA4_PROPERTY_IDS = json.loads(os.environ.get("GA4_PROPERTY_IDS", "{}"))
+
+BQ_PROJECT_ID = os.environ.get("BQ_PROJECT_ID", "my-first-project-416407")
+BQ_GA4_DATASET = os.environ.get("BQ_GA4_DATASET", "analytics_293507702")
+BQ_GADS_DATASET = os.environ.get("BQ_GADS_DATASET", "artcaffe_artcaffemarket_co_ke")
+BQ_SERVICE_ACCOUNT_JSON = os.environ.get("BQ_SERVICE_ACCOUNT_JSON")
 
 sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
@@ -57,7 +57,6 @@ router = APIRouter(prefix="/data", dependencies=[Depends(require_api_key)])
 # ---------------------------------------------------------------------------
 class SnapshotRequest(BaseModel):
     concept_id: Optional[str] = None
-    platform: Optional[str] = None  # defaults to "ga4"
 
 
 class ChatMessage(BaseModel):
@@ -71,114 +70,271 @@ class ChatRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# BigQuery client
 # ---------------------------------------------------------------------------
-def _concept_key(concept_id: str) -> Optional[str]:
-    row = (
-        sb.table("concepts")
-        .select("key")
-        .eq("id", concept_id)
-        .maybe_single()
-        .execute()
-    )
-    return (row.data or {}).get("key") if row and row.data else None
+def _bq_client():
+    from google.cloud import bigquery  # type: ignore
+    from google.oauth2 import service_account  # type: ignore
+
+    if BQ_SERVICE_ACCOUNT_JSON:
+        info = json.loads(BQ_SERVICE_ACCOUNT_JSON)
+        creds = service_account.Credentials.from_service_account_info(info)
+        return bigquery.Client(project=BQ_PROJECT_ID, credentials=creds)
+    # Fall back to Application Default Credentials (e.g. Cloud Run service account)
+    return bigquery.Client(project=BQ_PROJECT_ID)
 
 
-def _ga4_property_for(concept_id: Optional[str]) -> Optional[str]:
-    if not concept_id:
-        return GA4_PROPERTY_IDS.get("default")
-    key = _concept_key(concept_id)
-    return GA4_PROPERTY_IDS.get(key or "", GA4_PROPERTY_IDS.get("default"))
+# ---------------------------------------------------------------------------
+# BigQuery — GA4 pull
+# ---------------------------------------------------------------------------
+def _pull_ga4(project: str, dataset: str) -> dict[str, Any]:
+    client = _bq_client()
 
+    end_dt = date.today() - timedelta(days=1)   # yesterday (today is incomplete)
+    start_dt = end_dt - timedelta(days=6)        # 7-day window
+    start_sfx = start_dt.strftime("%Y%m%d")
+    end_sfx = end_dt.strftime("%Y%m%d")
+    tbl = f"`{project}.{dataset}.events_*`"
 
-def _pull_ga4_last_7d(property_id: str) -> dict[str, Any]:
-    """Pull last 7d core metrics from GA4 Data API."""
-    from google.analytics.data_v1beta import BetaAnalyticsDataClient
-    from google.analytics.data_v1beta.types import (
-        DateRange,
-        Dimension,
-        Metric,
-        RunReportRequest,
-    )
-    from google.oauth2 import service_account
+    # --- daily sessions / users / pageviews ---
+    daily_sql = f"""
+    SELECT
+      FORMAT_DATE('%Y-%m-%d', PARSE_DATE('%Y%m%d', event_date)) AS date,
+      COUNTIF(event_name = 'session_start')  AS sessions,
+      COUNT(DISTINCT user_pseudo_id)         AS active_users,
+      COUNTIF(event_name = 'page_view')      AS pageviews
+    FROM {tbl}
+    WHERE _TABLE_SUFFIX BETWEEN '{start_sfx}' AND '{end_sfx}'
+    GROUP BY date
+    ORDER BY date
+    """
 
-    creds_json = os.environ["GA4_SERVICE_ACCOUNT_JSON"]
-    creds = service_account.Credentials.from_service_account_info(
-        json.loads(creds_json),
-        scopes=["https://www.googleapis.com/auth/analytics.readonly"],
-    )
-    client = BetaAnalyticsDataClient(credentials=creds)
+    # --- traffic channel breakdown ---
+    channel_sql = f"""
+    SELECT
+      IFNULL(traffic_source.medium, '(none)')    AS medium,
+      IFNULL(traffic_source.source, '(direct)')  AS source,
+      COUNTIF(event_name = 'session_start')      AS sessions,
+      COUNT(DISTINCT user_pseudo_id)             AS users
+    FROM {tbl}
+    WHERE _TABLE_SUFFIX BETWEEN '{start_sfx}' AND '{end_sfx}'
+    GROUP BY medium, source
+    ORDER BY sessions DESC
+    LIMIT 10
+    """
 
-    req = RunReportRequest(
-        property=f"properties/{property_id}",
-        date_ranges=[DateRange(start_date="7daysAgo", end_date="yesterday")],
-        dimensions=[Dimension(name="date"), Dimension(name="sessionDefaultChannelGroup")],
-        metrics=[
-            Metric(name="sessions"),
-            Metric(name="activeUsers"),
-            Metric(name="screenPageViews"),
-            Metric(name="engagementRate"),
-            Metric(name="averageSessionDuration"),
-        ],
-    )
-    resp = client.run_report(req)
+    # --- top pages ---
+    pages_sql = f"""
+    SELECT
+      (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location' LIMIT 1) AS page_url,
+      (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_title'    LIMIT 1) AS page_title,
+      COUNT(*)                       AS pageviews,
+      COUNT(DISTINCT user_pseudo_id) AS unique_users
+    FROM {tbl}
+    WHERE _TABLE_SUFFIX BETWEEN '{start_sfx}' AND '{end_sfx}'
+      AND event_name = 'page_view'
+    GROUP BY page_url, page_title
+    ORDER BY pageviews DESC
+    LIMIT 20
+    """
 
-    rows = []
-    totals = {"sessions": 0, "activeUsers": 0, "screenPageViews": 0}
-    for r in resp.rows:
-        d = {h.name: v.value for h, v in zip(resp.dimension_headers, r.dimension_values)}
-        m = {h.name: float(v.value or 0) for h, v in zip(resp.metric_headers, r.metric_values)}
-        rows.append({**d, **m})
-        totals["sessions"] += int(m.get("sessions", 0))
-        totals["activeUsers"] += int(m.get("activeUsers", 0))
-        totals["screenPageViews"] += int(m.get("screenPageViews", 0))
+    daily    = [dict(r) for r in client.query(daily_sql).result()]
+    channels = [dict(r) for r in client.query(channel_sql).result()]
+    pages    = [dict(r) for r in client.query(pages_sql).result()]
+
+    totals = {
+        "sessions":    sum(r["sessions"]    for r in daily),
+        "active_users": sum(r["active_users"] for r in daily),
+        "pageviews":   sum(r["pageviews"]   for r in daily),
+    }
 
     return {
-        "property_id": property_id,
-        "range": {"start": "7daysAgo", "end": "yesterday"},
-        "totals": totals,
-        "rows": rows[:200],  # cap payload
+        "source":    "bigquery_ga4",
+        "dataset":   dataset,
+        "range":     {"start": start_dt.isoformat(), "end": end_dt.isoformat()},
+        "totals":    totals,
+        "daily":     daily,
+        "channels":  channels,
+        "top_pages": pages,
     }
+
+
+# ---------------------------------------------------------------------------
+# BigQuery — Paid ads + transactions pull
+# Covers: Google Ads + Facebook (blended via table__blend__cost__session__master)
+#         E-commerce revenue via table__transaction
+# ---------------------------------------------------------------------------
+def _pull_ads_and_transactions(project: str, dataset: str) -> dict[str, Any]:
+    """Pull last 7d paid performance and revenue from the artcaffe data mart."""
+    client = _bq_client()
+
+    end_dt   = date.today() - timedelta(days=1)
+    start_dt = end_dt - timedelta(days=6)
+    start_s  = start_dt.isoformat()
+    end_s    = end_dt.isoformat()
+
+    # --- Blended paid ads: daily rows per channel / campaign ---
+    ads_daily_sql = f"""
+    SELECT
+      CAST(event_date AS STRING)            AS date,
+      channel,
+      campaign_name,
+      CAST(spend AS FLOAT64)                AS spend,
+      CAST(impressions AS FLOAT64)          AS impressions,
+      CAST(clicks AS FLOAT64)               AS clicks,
+      CAST(budget AS FLOAT64)               AS budget,
+      CAST(ctr AS FLOAT64)                  AS ctr,
+      IFNULL(last_visit.sessions, 0)        AS sessions,
+      IFNULL(last_visit.total_users, 0)     AS total_users
+    FROM `{project}.{dataset}.table__blend__cost__session__master`
+    WHERE event_date BETWEEN DATE('{start_s}') AND DATE('{end_s}')
+    ORDER BY event_date DESC, spend DESC
+    LIMIT 500
+    """
+
+    # --- Channel-level totals (Google vs Facebook vs other) ---
+    ads_channel_sql = f"""
+    SELECT
+      channel,
+      ROUND(SUM(CAST(spend AS FLOAT64)), 2)             AS total_spend,
+      CAST(SUM(CAST(impressions AS FLOAT64)) AS INT64)  AS total_impressions,
+      CAST(SUM(CAST(clicks AS FLOAT64)) AS INT64)       AS total_clicks,
+      SUM(IFNULL(last_visit.sessions, 0))               AS total_sessions,
+      SUM(IFNULL(last_visit.total_users, 0))            AS total_users
+    FROM `{project}.{dataset}.table__blend__cost__session__master`
+    WHERE event_date BETWEEN DATE('{start_s}') AND DATE('{end_s}')
+    GROUP BY channel
+    ORDER BY total_spend DESC
+    """
+
+    # --- Transactions: daily revenue by attribution channel ---
+    txn_daily_sql = f"""
+    SELECT
+      CAST(event_date AS STRING)                          AS date,
+      IFNULL(traffic_source.medium, '(none)')             AS medium,
+      IFNULL(traffic_source.source, '(direct)')           AS source,
+      COUNT(DISTINCT transaction_id)                      AS transactions,
+      ROUND(SUM(ecommerce.purchase_revenue), 2)           AS revenue,
+      IFNULL(SUM(ecommerce.total_item_quantity), 0)       AS items_sold,
+      COUNT(DISTINCT user_pseudo_id)                      AS customers
+    FROM `{project}.{dataset}.table__transaction`
+    WHERE event_date BETWEEN DATE('{start_s}') AND DATE('{end_s}')
+      AND is_synthetics = FALSE
+    GROUP BY date, medium, source
+    ORDER BY date DESC, revenue DESC
+    LIMIT 200
+    """
+
+    # --- Revenue totals for the period ---
+    txn_totals_sql = f"""
+    SELECT
+      COUNT(DISTINCT transaction_id)                  AS total_transactions,
+      ROUND(SUM(ecommerce.purchase_revenue), 2)       AS total_revenue,
+      IFNULL(SUM(ecommerce.total_item_quantity), 0)   AS total_items_sold,
+      COUNT(DISTINCT user_pseudo_id)                  AS total_customers
+    FROM `{project}.{dataset}.table__transaction`
+    WHERE event_date BETWEEN DATE('{start_s}') AND DATE('{end_s}')
+      AND is_synthetics = FALSE
+    """
+
+    ads_daily    = [dict(r) for r in client.query(ads_daily_sql).result()]
+    ads_channels = [dict(r) for r in client.query(ads_channel_sql).result()]
+    txn_daily    = [dict(r) for r in client.query(txn_daily_sql).result()]
+    txn_totals_r = list(client.query(txn_totals_sql).result())
+    txn_totals   = dict(txn_totals_r[0]) if txn_totals_r else {}
+
+    total_spend       = sum(float(r.get("spend") or 0) for r in ads_daily)
+    total_impressions = sum(float(r.get("impressions") or 0) for r in ads_daily)
+    total_clicks      = sum(float(r.get("clicks") or 0) for r in ads_daily)
+
+    return {
+        "source":  "bigquery_artcaffe",
+        "dataset": dataset,
+        "range":   {"start": start_s, "end": end_s},
+        "paid_ads": {
+            "totals": {
+                "spend":       round(total_spend, 2),
+                "impressions": int(total_impressions),
+                "clicks":      int(total_clicks),
+                "ctr":         round(total_clicks / total_impressions, 4) if total_impressions else 0,
+            },
+            "by_channel": ads_channels,
+            "daily":      ads_daily,
+        },
+        "transactions": {
+            "totals":    txn_totals,
+            "by_source": txn_daily,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Snapshot helpers
+# ---------------------------------------------------------------------------
+def _upsert_snapshot(concept_id: str, platform: str, summary: dict) -> dict:
+    today = date.today().isoformat()
+    sb.table("platform_data_snapshots").upsert(
+        {
+            "concept_id":    concept_id,
+            "platform":      platform,
+            "snapshot_date": today,
+            "summary_json":  summary,
+        },
+        on_conflict="concept_id,platform,snapshot_date",
+    ).execute()
+    return {"concept_id": concept_id, "platform": platform, "snapshot_date": today}
+
+
+def _snapshot_concept(concept_id: str) -> dict:
+    results: dict[str, Any] = {"concept_id": concept_id}
+
+    # GA4
+    try:
+        ga4_data = _pull_ga4(BQ_PROJECT_ID, BQ_GA4_DATASET)
+        results["ga4"] = _upsert_snapshot(concept_id, "ga4", ga4_data)
+    except Exception as e:  # noqa: BLE001
+        results["ga4_error"] = str(e)
+
+    # Paid ads + transactions
+    try:
+        ads_data = _pull_ads_and_transactions(BQ_PROJECT_ID, BQ_GADS_DATASET)
+        results["paid_ads"] = _upsert_snapshot(concept_id, "paid_ads", ads_data)
+    except Exception as e:  # noqa: BLE001
+        results["paid_ads_error"] = str(e)
+
+    return results
 
 
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+@router.post("/snapshot")
+def snapshot(req: SnapshotRequest):
+    """Pull BigQuery data and upsert snapshots for one or all concepts."""
+    if not BQ_SERVICE_ACCOUNT_JSON:
+        raise HTTPException(500, "BQ_SERVICE_ACCOUNT_JSON not configured")
+
+    if req.concept_id:
+        return {"ok": True, "result": _snapshot_concept(req.concept_id)}
+
+    concepts = sb.table("concepts").select("id,key").execute().data or []
+    if not concepts:
+        raise HTTPException(404, "No concepts found in database")
+
+    results = []
+    for c in concepts:
+        try:
+            results.append(_snapshot_concept(c["id"]))
+        except Exception as e:  # noqa: BLE001
+            results.append({"concept_id": c["id"], "error": str(e)})
+
+    return {"ok": True, "snapshots": results}
+
+
+# Keep old route as alias so the existing frontend trigger still works
 @router.post("/ga4/snapshot")
-def ga4_snapshot(req: SnapshotRequest):
-    if not req.concept_id:
-        # snapshot all concepts that have a mapped property
-        concepts = sb.table("concepts").select("id,key").execute().data or []
-        out = []
-        for c in concepts:
-            pid = GA4_PROPERTY_IDS.get(c["key"])
-            if not pid:
-                continue
-            try:
-                out.append(_snapshot_one(c["id"], pid))
-            except Exception as e:  # noqa: BLE001
-                out.append({"concept_id": c["id"], "error": str(e)})
-        return {"ok": True, "snapshots": out}
-
-    pid = _ga4_property_for(req.concept_id)
-    if not pid:
-        raise HTTPException(404, "No GA4 property mapped for this concept")
-    return {"ok": True, "snapshot": _snapshot_one(req.concept_id, pid)}
-
-
-def _snapshot_one(concept_id: str, property_id: str) -> dict[str, Any]:
-    summary = _pull_ga4_last_7d(property_id)
-    today = date.today().isoformat()
-    sb.table("platform_data_snapshots").upsert(
-        {
-            "concept_id": concept_id,
-            "platform": "ga4",
-            "snapshot_date": today,
-            "summary_json": summary,
-        },
-        on_conflict="concept_id,platform,snapshot_date",
-    ).execute()
-    return {"concept_id": concept_id, "snapshot_date": today, "totals": summary["totals"]}
+def ga4_snapshot_alias(req: SnapshotRequest):
+    return snapshot(req)
 
 
 @router.post("/chat")
@@ -186,7 +342,6 @@ def chat(req: ChatRequest):
     if not ANTHROPIC_API_KEY:
         raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
 
-    # Load latest snapshots for this concept (last 14 days, all platforms)
     cutoff = (date.today() - timedelta(days=14)).isoformat()
     q = (
         sb.table("platform_data_snapshots")
@@ -201,12 +356,15 @@ def chat(req: ChatRequest):
 
     context_blob = json.dumps(snapshots, default=str)[:50_000]
     system = (
-        "You are the Artcaffe Data Agent. Answer questions about the user's "
-        "platform performance using ONLY the snapshot JSON provided. If the "
-        "data doesn't contain the answer, say so plainly. Be concise. When "
-        "useful, suggest a chart as a JSON object on its own line prefixed "
-        "with `CHART:` containing {type, title, data}."
-        f"\n\nSNAPSHOTS:\n{context_blob}"
+        "You are the Artcaffe Data Agent. Answer questions about platform performance "
+        "using ONLY the snapshot data provided below. Be concise and direct. "
+        "If the data doesn't contain the answer, say so plainly.\n\n"
+        "When a chart would help, output it on its own line as:\n"
+        "CHART: {\"type\": \"bar|line|pie\", \"title\": \"...\", "
+        "\"data\": [{\"name\": \"label\", \"value\": 123}, ...]}\n"
+        "For multi-series charts add extra numeric keys: "
+        "{\"name\": \"Mon\", \"sessions\": 120, \"users\": 80}\n\n"
+        f"SNAPSHOTS:\n{context_blob}"
     )
 
     import anthropic  # type: ignore
