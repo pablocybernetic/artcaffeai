@@ -205,6 +205,58 @@ def update_item_status(item_id: str, body: ItemStatusUpdate):
     return {"ok": True, "updated": res.data[0]}
 
 
+@router.get("/prompts")
+def get_agent_prompts():
+    """Return the live system prompts and models used by every agent."""
+    from brand_pipeline import SYSTEM_PROMPT as research_prompt  # noqa: PLC0415
+    from ideation_agent import SYSTEM_PROMPT as ideation_prompt, MODEL as ideation_model  # noqa: PLC0415
+    from production_agent import SYSTEM_PROMPT as production_prompt, MODEL as production_model  # noqa: PLC0415
+    from image_agent import PROMPT_SYSTEM as image_prompt, MODEL as image_model  # noqa: PLC0415
+    from data_routes import DATA_AGENT_SYSTEM_PROMPT, DATA_AGENT_MODEL  # noqa: PLC0415
+
+    research_model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+
+    return {
+        "agents": [
+            {
+                "id": "research",
+                "name": "Research Agent",
+                "model": research_model,
+                "trigger": "Runs when a brand guidelines PDF is uploaded",
+                "prompt": research_prompt,
+            },
+            {
+                "id": "ideation",
+                "name": "Ideation Agent",
+                "model": ideation_model,
+                "trigger": "Runs when \"Run Ideation\" is clicked on a brief card",
+                "prompt": ideation_prompt,
+            },
+            {
+                "id": "production",
+                "name": "Production Copy Agent",
+                "model": production_model,
+                "trigger": "Runs when \"Write final copy\" is clicked on an approved concept",
+                "prompt": production_prompt,
+            },
+            {
+                "id": "data",
+                "name": "Data Agent",
+                "model": DATA_AGENT_MODEL,
+                "trigger": "Runs on every message in the Analytics chat",
+                "prompt": DATA_AGENT_SYSTEM_PROMPT,
+            },
+            {
+                "id": "image",
+                "name": "Image Prompt Agent",
+                "model": image_model,
+                "trigger": "Runs when \"Generate banner\" is clicked (AI image generation must be enabled)",
+                "prompt": image_prompt,
+            },
+        ]
+    }
+
+
 @router.post("/generate-banner")
 def generate_banner(req: BannerRequest):
     """

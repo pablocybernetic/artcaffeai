@@ -51,6 +51,22 @@ def require_api_key(x_api_key: Optional[str] = Header(None)) -> None:
 
 router = APIRouter(prefix="/data", dependencies=[Depends(require_api_key)])
 
+DATA_AGENT_MODEL = "claude-haiku-4-5"
+DATA_AGENT_SYSTEM_PROMPT = (
+    "You are the Artcaffe Data Agent. Answer questions about platform performance "
+    "using ONLY the snapshot data provided below. Be concise and direct. "
+    "If the data doesn't contain the answer, say so plainly.\n\n"
+    "CHART RULES — follow exactly:\n"
+    "- When a chart would help, place it on its own line starting with CHART: followed by a single-line JSON object.\n"
+    "- The JSON MUST be on ONE line — no newlines inside it.\n"
+    "- Required format: CHART: {\"type\":\"bar\",\"title\":\"My Title\",\"data\":[{\"name\":\"Label\",\"value\":123}]}\n"
+    "- Each data item is a flat object with a \"name\" string key and one or more numeric value keys.\n"
+    "- Multi-series example: CHART: {\"type\":\"bar\",\"title\":\"Sessions vs Users\",\"data\":[{\"name\":\"Mon\",\"sessions\":120,\"users\":80}]}\n"
+    "- NEVER use Chart.js format (labels/datasets arrays). ONLY the flat array format above.\n"
+    "- Output any CHART: line AFTER your text answer, not before.\n\n"
+    "[SNAPSHOTS injected at runtime]"
+)
+
 
 # ---------------------------------------------------------------------------
 # Schemas
@@ -355,20 +371,7 @@ def chat(req: ChatRequest):
     snapshots = q.execute().data or []
 
     context_blob = json.dumps(snapshots, default=str)[:50_000]
-    system = (
-        "You are the Artcaffe Data Agent. Answer questions about platform performance "
-        "using ONLY the snapshot data provided below. Be concise and direct. "
-        "If the data doesn't contain the answer, say so plainly.\n\n"
-        "CHART RULES — follow exactly:\n"
-        "- When a chart would help, place it on its own line starting with CHART: followed by a single-line JSON object.\n"
-        "- The JSON MUST be on ONE line — no newlines inside it.\n"
-        "- Required format: CHART: {\"type\":\"bar\",\"title\":\"My Title\",\"data\":[{\"name\":\"Label\",\"value\":123}]}\n"
-        "- Each data item is a flat object with a \"name\" string key and one or more numeric value keys.\n"
-        "- Multi-series example: CHART: {\"type\":\"bar\",\"title\":\"Sessions vs Users\",\"data\":[{\"name\":\"Mon\",\"sessions\":120,\"users\":80}]}\n"
-        "- NEVER use Chart.js format (labels/datasets arrays). ONLY the flat array format above.\n"
-        "- Output any CHART: line AFTER your text answer, not before.\n\n"
-        f"SNAPSHOTS:\n{context_blob}"
-    )
+    system = DATA_AGENT_SYSTEM_PROMPT.replace("[SNAPSHOTS injected at runtime]", f"SNAPSHOTS:\n{context_blob}")
 
     import anthropic  # type: ignore
 
