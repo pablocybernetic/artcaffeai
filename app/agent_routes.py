@@ -25,6 +25,7 @@ from supabase import Client, create_client
 import os
 
 from job_runner import run_job
+from image_agent import run_image_generation
 
 # ---------------------------------------------------------------------------
 # Config
@@ -73,6 +74,14 @@ class ProductionRequest(BaseModel):
 
 class ItemStatusUpdate(BaseModel):
     status: str
+
+
+class BannerRequest(BaseModel):
+    concept_id: str
+    content_item_id: str          # attach generated image to this item
+    headline: str
+    caption: str
+    platform: str = "instagram"
 
 
 # ---------------------------------------------------------------------------
@@ -194,3 +203,30 @@ def update_item_status(item_id: str, body: ItemStatusUpdate):
         raise HTTPException(status_code=404, detail=f"Content item not found: {item_id}")
 
     return {"ok": True, "updated": res.data[0]}
+
+
+@router.post("/generate-banner")
+def generate_banner(req: BannerRequest):
+    """
+    Generate a marketing banner image for a content item.
+    Runs synchronously — may take 15-60 seconds depending on provider.
+    Returns the created asset row with public_url for immediate display.
+    """
+    from anthropic import Anthropic  # noqa: PLC0415
+
+    anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    try:
+        asset = run_image_generation(
+            sb=sb,
+            anthropic=anthropic_client,
+            concept_id=req.concept_id,
+            content_item_id=req.content_item_id,
+            headline=req.headline,
+            caption=req.caption,
+            platform=req.platform,
+        )
+        return {"ok": True, "asset": asset}
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Image generation failed: {e}")
