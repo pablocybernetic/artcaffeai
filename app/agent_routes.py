@@ -26,6 +26,7 @@ import os
 
 from job_runner import run_job
 from image_agent import run_image_generation
+from image_analysis_agent import analyze_asset as _analyze_asset
 
 # ---------------------------------------------------------------------------
 # Config
@@ -82,6 +83,10 @@ class BannerRequest(BaseModel):
     headline: str
     caption: str
     platform: str = "instagram"
+
+
+class AnalyzeAssetRequest(BaseModel):
+    asset_id: str
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +260,25 @@ def get_agent_prompts():
             },
         ]
     }
+
+
+@router.post("/analyze-asset")
+def analyze_asset_endpoint(req: AnalyzeAssetRequest):
+    """
+    Run Claude Haiku vision analysis on an uploaded image asset.
+    Updates the asset row with metadata and analysis_status='done'.
+    Runs synchronously — typically completes in 5-15 seconds.
+    """
+    from anthropic import Anthropic  # noqa: PLC0415
+
+    anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    try:
+        metadata = _analyze_asset(sb=sb, anthropic=anthropic_client, asset_id=req.asset_id)
+        return {"ok": True, "asset_id": req.asset_id, "metadata": metadata}
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {e}")
 
 
 @router.post("/generate-banner")

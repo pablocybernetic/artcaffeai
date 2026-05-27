@@ -50,6 +50,7 @@ Rules:
 - Reference at least one messaging pillar in every idea's rationale.
 - Every idea must feel premium, warm, and distinctly Artcaffe.
 - For asset_ids: pick 1-2 asset UUIDs from the AVAILABLE ASSETS list that best fit the idea visually.
+  Use the desc, tags, mood, food, scene, style, and people fields to make precise matches.
   Use exact UUIDs only. If no asset fits well, use an empty array [].
 - Return ONLY the JSON object — absolutely no text before or after it.\
 """
@@ -72,7 +73,7 @@ def _fetch_assets(sb: Client, concept_id: str) -> list[dict]:
     """Fetch image/video assets for this concept to pass to the agent."""
     res = (
         sb.table("assets")
-        .select("id,filename,asset_type,public_url,platform")
+        .select("id,filename,asset_type,public_url,platform,metadata,analysis_status")
         .eq("concept_id", concept_id)
         .in_("asset_type", ["image", "video"])
         .order("created_at", desc=True)
@@ -90,7 +91,44 @@ def _build_asset_section(assets: list[dict]) -> str:
         name = a.get("filename") or "unnamed"
         atype = a.get("asset_type") or "file"
         platform = a.get("platform") or ""
-        lines.append(f"- {a['id']} | {atype} | {name}" + (f" | {platform}" if platform else ""))
+        meta = a.get("metadata") or {}
+        status = a.get("analysis_status") or "pending"
+
+        line = f"- {a['id']} | {atype} | {name}"
+        if platform:
+            line += f" | platform:{platform}"
+
+        # Include AI-generated metadata when available — gives the agent rich
+        # visual context to match assets precisely to content ideas.
+        if meta and status == "done":
+            desc = meta.get("description", "")
+            tags = ", ".join(meta.get("tags", [])[:8])
+            mood = meta.get("mood", "")
+            food = ", ".join(meta.get("food_items", []))
+            scene = meta.get("scene_type", "")
+            style = meta.get("photography_style", "")
+            people = meta.get("people_present")
+
+            meta_parts: list[str] = []
+            if desc:
+                meta_parts.append(f"desc:{desc}")
+            if tags:
+                meta_parts.append(f"tags:[{tags}]")
+            if mood:
+                meta_parts.append(f"mood:{mood}")
+            if food:
+                meta_parts.append(f"food:[{food}]")
+            if scene:
+                meta_parts.append(f"scene:{scene}")
+            if style:
+                meta_parts.append(f"style:{style}")
+            if people is not None:
+                meta_parts.append(f"people:{'yes' if people else 'no'}")
+
+            if meta_parts:
+                line += " | " + " | ".join(meta_parts)
+
+        lines.append(line)
     lines.append("")
     return "\n".join(lines)
 
