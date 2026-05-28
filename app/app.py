@@ -34,6 +34,7 @@ from supabase import Client, create_client
 from job_runner import run_job
 from data_routes import router as data_router
 from agent_routes import router as agent_router
+from publishing_routes import router as publish_router
 
 # ---------------------------------------------------------------------------
 # Config
@@ -57,6 +58,7 @@ app.add_middleware(
 
 app.include_router(data_router)
 app.include_router(agent_router)
+app.include_router(publish_router)
 
 
 # ---------------------------------------------------------------------------
