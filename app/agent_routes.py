@@ -185,11 +185,14 @@ def list_items(brief_id: str):
 
 
 @router.patch("/items/{item_id}")
-def update_item_status(item_id: str, body: ItemStatusUpdate):
+def update_item_status(item_id: str, body: ItemStatusUpdate, bg: BackgroundTasks):
     """
     Update the status of a content item.
 
     Allowed statuses: approved | rejected | draft | pending_review
+
+    Side-effect: when the new status is pending_review, all active admins and
+    content managers receive an approval-needed email notification.
     """
     if body.status not in VALID_STATUSES:
         raise HTTPException(
@@ -209,7 +212,23 @@ def update_item_status(item_id: str, body: ItemStatusUpdate):
     if not res.data:
         raise HTTPException(status_code=404, detail=f"Content item not found: {item_id}")
 
-    return {"ok": True, "updated": res.data[0]}
+    item = res.data[0]
+
+    # Fire approval notifications in the background (non-blocking).
+    if body.status == "pending_review":
+        brief_id = item.get("brief_id", "")
+        title = item.get("title") or item.get("headline") or "Untitled"
+
+        def _notify():
+            from notification_service import notify_approval_needed_to_team  # noqa: PLC0415
+            try:
+                notify_approval_needed_to_team(sb, brief_id=brief_id, title=title)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[agent_routes] approval notification failed: {exc}", flush=True)
+
+        bg.add_task(_notify)
+
+    return {"ok": True, "updated": item}
 
 
 @router.get("/prompts")
