@@ -110,14 +110,14 @@ def _make_image_prompt(
 _VALID_DALLE_SIZES = {"1024x1024", "1792x1024", "1024x1792"}
 
 
-def _generate_dalle(prompt: str, size: str) -> bytes:
-    if not OPENAI_API_KEY:
+def _generate_dalle(prompt: str, size: str, api_key: str) -> bytes:
+    if not api_key:
         raise RuntimeError("OPENAI_API_KEY not configured")
     if size not in _VALID_DALLE_SIZES:
         size = "1024x1024"
     r = httpx.post(
         "https://api.openai.com/v1/images/generations",
-        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json={"model": "dall-e-3", "prompt": prompt, "n": 1, "size": size, "response_format": "url"},
         timeout=90.0,
     )
@@ -128,14 +128,14 @@ def _generate_dalle(prompt: str, size: str) -> bytes:
     return img.content
 
 
-def _generate_ideogram(prompt: str, negative_prompt: str, size: str) -> bytes:
-    if not IDEOGRAM_API_KEY:
+def _generate_ideogram(prompt: str, negative_prompt: str, size: str, api_key: str) -> bytes:
+    if not api_key:
         raise RuntimeError("IDEOGRAM_API_KEY not configured")
     aspect_map = {"1024x1024": "ASPECT_1_1", "1792x1024": "ASPECT_16_9", "1024x1792": "ASPECT_9_16"}
     aspect = aspect_map.get(size, "ASPECT_1_1")
     r = httpx.post(
         "https://api.ideogram.ai/generate",
-        headers={"Api-Key": IDEOGRAM_API_KEY, "Content-Type": "application/json"},
+        headers={"Api-Key": api_key, "Content-Type": "application/json"},
         json={"image_request": {
             "prompt": prompt,
             "negative_prompt": negative_prompt,
@@ -152,25 +152,45 @@ def _generate_ideogram(prompt: str, negative_prompt: str, size: str) -> bytes:
     return img.content
 
 
-def _pick_provider() -> str:
-    if IMAGE_PROVIDER == "ideogram" and IDEOGRAM_API_KEY:
-        return "ideogram"
-    if OPENAI_API_KEY:
-        return "openai"
-    if IDEOGRAM_API_KEY:
-        return "ideogram"
+def _pick_provider(
+    key_override: str = "",
+    provider_override: str = "",
+) -> tuple[str, str]:
+    """Returns (provider_name, api_key). Prefers request-level overrides over env vars."""
+    # Resolve provider preference
+    preferred = provider_override.strip() or IMAGE_PROVIDER
+
+    if preferred == "ideogram":
+        key = key_override.strip() or IDEOGRAM_API_KEY or ""
+        if key:
+            return "ideogram", key
+        # fall through to try openai
+    # Try openai
+    key = (key_override.strip() if preferred == "openai" else "") or OPENAI_API_KEY or ""
+    if key:
+        return "openai", key
+    # Last resort: any ideogram key
+    key = IDEOGRAM_API_KEY or ""
+    if key:
+        return "ideogram", key
     raise RuntimeError(
         "No image provider configured. Set OPENAI_API_KEY (DALL-E 3) "
         "or IDEOGRAM_API_KEY + IMAGE_PROVIDER=ideogram."
     )
 
 
-def _generate_image(prompt: str, negative_prompt: str, size: str) -> tuple[bytes, str]:
+def _generate_image(
+    prompt: str,
+    negative_prompt: str,
+    size: str,
+    key_override: str = "",
+    provider_override: str = "",
+) -> tuple[bytes, str]:
     """Generate image bytes. Returns (bytes, provider_name)."""
-    provider = _pick_provider()
+    provider, api_key = _pick_provider(key_override, provider_override)
     if provider == "ideogram":
-        return _generate_ideogram(prompt, negative_prompt, size), "ideogram"
-    return _generate_dalle(prompt, size), "dalle3"
+        return _generate_ideogram(prompt, negative_prompt, size, api_key), "ideogram"
+    return _generate_dalle(prompt, size, api_key), "dalle3"
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +228,8 @@ def run_image_generation(
     headline: str,
     caption: str,
     platform: str = "instagram",
+    image_api_key: str = "",
+    image_provider_override: str = "",
 ) -> dict:
     """
     Generate a banner image and save it as an asset.
@@ -238,7 +260,11 @@ def run_image_generation(
     print(f"[image_agent] prompt='{image_prompt[:120]}…' size={size}", flush=True)
 
     # 3. Generate image
-    image_bytes, provider = _generate_image(image_prompt, negative_prompt, size)
+    image_bytes, provider = _generate_image(
+        image_prompt, negative_prompt, size,
+        key_override=image_api_key,
+        provider_override=image_provider_override,
+    )
 
     # 4. Upload to storage
     bucket, storage_path, public_url = _upload_to_storage(sb, image_bytes, concept_id)

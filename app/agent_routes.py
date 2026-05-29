@@ -83,6 +83,8 @@ class BannerRequest(BaseModel):
     headline: str
     caption: str
     platform: str = "instagram"
+    image_provider: str = ""      # "openai" | "ideogram" — overrides env IMAGE_PROVIDER
+    image_api_key: str = ""       # key from frontend Settings — overrides env var
 
 
 class AnalyzeAssetRequest(BaseModel):
@@ -307,11 +309,13 @@ def generate_banner(req: BannerRequest):
             headline=req.headline,
             caption=req.caption,
             platform=req.platform,
+            image_api_key=req.image_api_key,
+            image_provider_override=req.image_provider,
         )
         return {"ok": True, "asset": asset, "mode": "generated"}
     except RuntimeError as e:
         err_str = str(e)
-        # No image provider configured → fall back to selecting an existing asset.
+        # No image provider / key configured → fall back to selecting an existing asset.
         if any(phrase in err_str.lower() for phrase in _NO_PROVIDER_PHRASES):
             try:
                 asset = select_best_asset(
