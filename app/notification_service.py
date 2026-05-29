@@ -11,7 +11,7 @@ Email delivery is attempted via Resend when RESEND_API_KEY is set.
 
 Env vars:
   RESEND_API_KEY         — Resend API key (email disabled if not set)
-  NOTIFY_FROM_EMAIL      — sender address (default: noreply@artcaffe.co.ke)
+  NOTIFY_FROM_EMAIL      — sender address (default: noreply@artcaffemarket.co.ke)
   DASHBOARD_URL          — base URL for dashboard links in emails
                            (default: https://marketing.artcaffe.co.ke)
 """
@@ -25,7 +25,7 @@ from typing import Any, Optional
 from supabase import Client
 
 RESEND_API_KEY   = os.environ.get("RESEND_API_KEY")
-FROM_EMAIL       = os.environ.get("NOTIFY_FROM_EMAIL", "noreply@artcaffe.co.ke")
+FROM_EMAIL       = os.environ.get("NOTIFY_FROM_EMAIL", "noreply@artcaffemarket.co.ke")
 DASHBOARD_URL    = os.environ.get("DASHBOARD_URL", "https://marketing.artcaffe.co.ke")
 
 
