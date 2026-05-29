@@ -38,8 +38,14 @@ $$;
 -- and clears its in-memory cache.
 -- ============================================================
 
--- Enable Realtime on brand_contexts
-alter publication supabase_realtime add table brand_contexts;
+-- Enable Realtime on brand_contexts (idempotent)
+DO $$
+BEGIN
+  ALTER PUBLICATION supabase_realtime ADD TABLE public.brand_contexts;
+EXCEPTION WHEN duplicate_object THEN
+  NULL; -- already in publication, skip
+END;
+$$;
 
 -- The Next.js frontend and FastAPI workers subscribe to this channel:
 -- supabase.channel('brand_contexts')
