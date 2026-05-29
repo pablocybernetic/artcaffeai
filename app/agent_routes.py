@@ -25,7 +25,7 @@ from supabase import Client, create_client
 import os
 
 from job_runner import run_job
-from image_agent import run_image_generation
+from image_agent import run_image_generation, select_best_asset
 from image_analysis_agent import analyze_asset as _analyze_asset
 
 # ---------------------------------------------------------------------------
@@ -281,16 +281,23 @@ def analyze_asset_endpoint(req: AnalyzeAssetRequest):
         raise HTTPException(status_code=500, detail=f"Analysis failed: {e}")
 
 
+_NO_PROVIDER_PHRASES = ("not configured", "no image provider")
+
+
 @router.post("/generate-banner")
 def generate_banner(req: BannerRequest):
     """
     Generate a marketing banner image for a content item.
-    Runs synchronously — may take 15-60 seconds depending on provider.
-    Returns the created asset row with public_url for immediate display.
+    If no image API key is configured, falls back to Claude selecting
+    the best existing asset from the library instead.
+    Runs synchronously — may take 15-60 seconds for image generation.
+    Returns the created/selected asset row with public_url for immediate display.
     """
     from anthropic import Anthropic  # noqa: PLC0415
 
     anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+
+    # Try to generate a brand-new image first.
     try:
         asset = run_image_generation(
             sb=sb,
@@ -301,8 +308,24 @@ def generate_banner(req: BannerRequest):
             caption=req.caption,
             platform=req.platform,
         )
-        return {"ok": True, "asset": asset}
+        return {"ok": True, "asset": asset, "mode": "generated"}
     except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        err_str = str(e)
+        # No image provider configured → fall back to selecting an existing asset.
+        if any(phrase in err_str.lower() for phrase in _NO_PROVIDER_PHRASES):
+            try:
+                asset = select_best_asset(
+                    sb=sb,
+                    anthropic=anthropic_client,
+                    concept_id=req.concept_id,
+                    content_item_id=req.content_item_id,
+                    headline=req.headline,
+                    caption=req.caption,
+                    platform=req.platform,
+                )
+                return {"ok": True, "asset": asset, "mode": "selected"}
+            except RuntimeError as fe:
+                raise HTTPException(status_code=400, detail=str(fe))
+        raise HTTPException(status_code=400, detail=err_str)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Image generation failed: {e}")

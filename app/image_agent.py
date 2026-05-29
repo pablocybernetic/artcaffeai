@@ -275,3 +275,89 @@ def run_image_generation(
             }).eq("id", content_item_id).execute()
 
     return {**saved, "_prompt": image_prompt, "_provider": provider, "_size": size}
+
+
+# ---------------------------------------------------------------------------
+# Fallback: select best existing asset when no image provider is configured
+# ---------------------------------------------------------------------------
+SELECT_SYSTEM = """\
+You are an art director for Artcaffe Coffee & Restaurant.
+Given a content headline, caption, and a list of available image assets,
+pick the single asset that best matches the visual tone and subject.
+Output ONLY the UUID of your choice — nothing else.\
+"""
+
+
+def select_best_asset(
+    *,
+    sb: Client,
+    anthropic: Any,
+    concept_id: str,
+    content_item_id: str | None,
+    headline: str,
+    caption: str,
+    platform: str = "instagram",
+) -> dict:
+    """
+    When no image generation provider is configured, use Claude to pick
+    the best matching existing asset from the library.
+    Attaches it to content_item_id and returns the asset row.
+    """
+    import re  # noqa: PLC0415
+    from ideation_agent import _fetch_assets, _build_asset_section  # noqa: PLC0415
+
+    assets = _fetch_assets(sb, concept_id)
+    if not assets:
+        raise RuntimeError(
+            "No assets found in library. Upload images in Assets first, "
+            "or add an image API key to generate new banners."
+        )
+
+    valid_ids = {a["id"] for a in assets}
+    asset_section = _build_asset_section(assets)
+
+    user_msg = (
+        f"HEADLINE: {headline}\n"
+        f"CAPTION: {caption}\n"
+        f"PLATFORM: {platform}\n"
+        f"{asset_section}\n"
+        "Output ONLY the single best-matching UUID."
+    )
+
+    resp = anthropic.messages.create(
+        model=MODEL,
+        max_tokens=60,
+        system=SELECT_SYSTEM,
+        messages=[{"role": "user", "content": user_msg}],
+        timeout=15.0,
+    )
+    raw = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+
+    # Extract any UUID from the response and validate it
+    candidates = re.findall(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", raw, re.I
+    )
+    chosen_id = next((uid for uid in candidates if uid in valid_ids), None)
+
+    if not chosen_id:
+        chosen_id = assets[0]["id"]  # last resort: most-recent asset
+
+    asset = next(a for a in assets if a["id"] == chosen_id)
+
+    if content_item_id:
+        item_res = (
+            sb.table("content_items")
+            .select("asset_ids")
+            .eq("id", content_item_id)
+            .single()
+            .execute()
+        )
+        if item_res.data:
+            existing = item_res.data.get("asset_ids") or []
+            if chosen_id not in existing:
+                sb.table("content_items").update({
+                    "asset_ids": list({*existing, chosen_id}),
+                    "updated_at": _now(),
+                }).eq("id", content_item_id).execute()
+
+    return {**asset, "_mode": "selected"}
