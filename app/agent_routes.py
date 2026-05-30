@@ -297,13 +297,24 @@ def env_check():
 @router.post("/test-notification")
 def test_notification():
     """Send a live test notification email and report the result."""
-    from notification_service import _send_email  # noqa: PLC0415
-    sent = _send_email(
-        to_email=os.environ.get("NOTIFY_TO_EMAIL", "pgitau@artcaffe.co.ke"),
-        subject="Artcaffe AI — Live notification test",
-        html="<p>This test was triggered via <code>POST /agents/test-notification</code>. If you see this, notifications are working.</p>",
-    )
-    return {"ok": sent, "from": os.environ.get("NOTIFY_FROM_EMAIL", "noreply@artcaffemarket.co.ke")}
+    import traceback  # noqa: PLC0415
+    api_key = os.environ.get("RESEND_API_KEY")
+    from_addr = os.environ.get("NOTIFY_FROM_EMAIL", "noreply@artcaffemarket.co.ke")
+    to_email = os.environ.get("NOTIFY_TO_EMAIL", "pgitau@artcaffe.co.ke")
+    if not api_key:
+        return {"ok": False, "error": "RESEND_API_KEY not set", "from": from_addr}
+    try:
+        import resend  # noqa: PLC0415
+        resend.api_key = api_key
+        result = resend.Emails.send({
+            "from": from_addr,
+            "to": to_email,
+            "subject": "Artcaffe AI — Live notification test",
+            "html": "<p>Live test from FastAPI process.</p>",
+        })
+        return {"ok": True, "from": from_addr, "to": to_email, "result": str(result)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "trace": traceback.format_exc(), "from": from_addr}
 
 
 @router.post("/analyze-asset")
