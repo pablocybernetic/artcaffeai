@@ -24,7 +24,26 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
+
+# Load .env from the repo root (two levels up from app/) so all workers
+# have consistent env vars regardless of how systemd was configured.
+def _load_dotenv() -> None:
+    env_file = Path(__file__).parent.parent / ".env"
+    if not env_file.exists():
+        return
+    with env_file.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            os.environ.setdefault(key, val)
+
+_load_dotenv()
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware

@@ -283,6 +283,29 @@ def get_agent_prompts():
     }
 
 
+@router.get("/env-check")
+def env_check():
+    """Diagnostic: show which notification env vars are present in this process."""
+    return {
+        "RESEND_API_KEY":    "SET" if os.environ.get("RESEND_API_KEY") else "MISSING",
+        "NOTIFY_FROM_EMAIL": os.environ.get("NOTIFY_FROM_EMAIL", "(default: noreply@artcaffemarket.co.ke)"),
+        "NOTIFY_TO_EMAIL":   os.environ.get("NOTIFY_TO_EMAIL", "(default: pgitau@artcaffe.co.ke)"),
+        "DASHBOARD_URL":     os.environ.get("DASHBOARD_URL", "(default)"),
+    }
+
+
+@router.post("/test-notification")
+def test_notification():
+    """Send a live test notification email and report the result."""
+    from notification_service import _send_email  # noqa: PLC0415
+    sent = _send_email(
+        to_email=os.environ.get("NOTIFY_TO_EMAIL", "pgitau@artcaffe.co.ke"),
+        subject="Artcaffe AI — Live notification test",
+        html="<p>This test was triggered via <code>POST /agents/test-notification</code>. If you see this, notifications are working.</p>",
+    )
+    return {"ok": sent, "from": os.environ.get("NOTIFY_FROM_EMAIL", "noreply@artcaffemarket.co.ke")}
+
+
 @router.post("/analyze-asset")
 def analyze_asset_endpoint(req: AnalyzeAssetRequest):
     """

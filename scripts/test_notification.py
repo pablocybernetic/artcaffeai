@@ -59,7 +59,7 @@ try:
     from notification_service import notify_approval_needed_to_team
 
     sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
-    sent = notify_approval_needed_to_team(sb, brief_id="00000000-0000-0000-0000-000000000000", title="Smoke Test Content Item")
+    sent = notify_approval_needed_to_team(sb, brief_id=None, title="Smoke Test Content Item")
     print(f"  Emails sent: {sent}")
 except Exception as e:
     print(f"  FAILED: {e}")

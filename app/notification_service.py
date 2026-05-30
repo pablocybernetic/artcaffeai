@@ -35,13 +35,16 @@ def _now() -> str:
 
 def _send_email(to_email: str, subject: str, html: str) -> bool:
     """Fire-and-forget Resend email. Returns True on success."""
-    if not RESEND_API_KEY:
+    api_key = os.environ.get("RESEND_API_KEY") or RESEND_API_KEY
+    from_addr = os.environ.get("NOTIFY_FROM_EMAIL", "noreply@artcaffemarket.co.ke")
+    if not api_key:
+        print(f"[notification_service] RESEND_API_KEY not set — skipping email to={to_email}", flush=True)
         return False
     try:
         import resend  # type: ignore
-        resend.api_key = RESEND_API_KEY
+        resend.api_key = api_key
         resend.Emails.send({
-            "from": FROM_EMAIL,
+            "from": from_addr,
             "to": to_email,
             "subject": subject,
             "html": html,
@@ -194,7 +197,7 @@ def notify_team(
 def notify_approval_needed_to_team(
     sb: Client,
     *,
-    brief_id: str,
+    brief_id: Optional[str],
     title: str,
 ) -> int:
     """
