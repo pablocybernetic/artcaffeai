@@ -214,7 +214,6 @@ def run_research(
         "period_end": today.isoformat(),
         "opportunities": opportunities,
         "summary": summary,
-        "model": MODEL,
         "job_id": job_id,
         "created_at": _now(),
     }
