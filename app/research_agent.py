@@ -1,16 +1,21 @@
 """
-research_agent.py
------------------
-Analyses platform performance data and brand context to surface
-3-5 actionable content opportunities per concept.
+research_agent.py  (v2 — agentic tool-use loop)
+-------------------------------------------------
+Replaces the single-call approach with an agentic loop that gives Claude
+three tools to gather information before synthesising opportunities:
 
-Workflow:
-  1. Load active brand context for the concept.
-  2. Fetch the latest platform_data_snapshots (last 28 days).
-  3. Fetch recent content_briefs (last 30 days) to avoid repetition.
-  4. Call Claude Sonnet to identify opportunities.
-  5. Persist the research brief to research_briefs table.
-  6. Return structured opportunities ready for the Ideation Agent.
+  1. web_search  (server-side, Anthropic-hosted)
+     → trends in Nairobi, competitor activity, cultural moments, food scene
+
+  2. get_platform_data  (custom / client-side)
+     → BigQuery snapshots stored in platform_data_snapshots
+
+  3. get_recent_briefs  (custom / client-side)
+     → recent content_briefs so Claude avoids repeating angles
+
+Claude decides which tools to call and when.  We execute the two custom tools
+and feed results back.  The loop ends when Claude emits stop_reason="end_turn"
+and writes the final JSON research brief.
 """
 from __future__ import annotations
 
@@ -27,9 +32,15 @@ MODEL = "claude-sonnet-4-6"
 SYSTEM_PROMPT = """\
 You are a senior data-driven marketing strategist for Artcaffe, a premium café brand in Nairobi, Kenya.
 
-Your job is to analyse platform performance data and brand positioning, then identify the most compelling content opportunities for the next 1-2 weeks.
+Your job: identify 3-5 high-impact content opportunities for the next 1-2 weeks.
 
-Output ONLY a JSON object with this exact shape — no markdown fences, no prose:
+Workflow — use the tools in this order:
+1. Call get_platform_data to understand internal performance (what is working, what is not).
+2. Call get_recent_briefs to see what angles have been covered recently (avoid repetition).
+3. Call web_search for current trends, events in Kenya/Nairobi, competitor activity, relevant cultural moments, and seasonal hooks.
+   Search 2-4 times with different queries (e.g. "Nairobi food trends June 2026", "Artcaffe Kenya competitor marketing", "Kenya cultural events this week").
+
+After gathering sufficient data, write ONLY a JSON object in this exact shape:
 {
   "summary": "2-3 sentence overview of current performance and the key theme across opportunities",
   "opportunities": [
@@ -47,15 +58,16 @@ Output ONLY a JSON object with this exact shape — no markdown fences, no prose
 }
 
 Rules:
-- Base every opportunity on specific data signals — never invent metrics.
+- Base every opportunity on specific data signals from the tools — never invent metrics.
 - Avoid repeating angles already covered in recent briefs.
 - Each opportunity must align with the brand voice and at least one messaging pillar.
-- Prioritise platforms where performance data shows engagement or spend opportunity.
-- If data is thin, use brand positioning to suggest opportunistic angles (e.g. seasonal, cultural moments in Kenya).
-- Return 3-5 opportunities. Quality over quantity.
-- Return ONLY the JSON object.\
+- Return ONLY the JSON object — no prose before or after it.\
 """
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _parse_json(text: str) -> Any:
     text = text.strip()
@@ -71,7 +83,6 @@ def _now() -> str:
 
 
 def _fetch_snapshots(sb: Client, concept_id: str, days: int = 28) -> list[dict]:
-    """Fetch recent platform snapshots for context."""
     since = (date.today() - timedelta(days=days)).isoformat()
     res = (
         sb.table("platform_data_snapshots")
@@ -86,7 +97,6 @@ def _fetch_snapshots(sb: Client, concept_id: str, days: int = 28) -> list[dict]:
 
 
 def _fetch_recent_briefs(sb: Client, concept_id: str, days: int = 30) -> list[dict]:
-    """Fetch recent content briefs to avoid repeating angles."""
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     res = (
         sb.table("content_briefs")
@@ -100,54 +110,132 @@ def _fetch_recent_briefs(sb: Client, concept_id: str, days: int = 30) -> list[di
     return res.data or []
 
 
-def _build_snapshot_section(snapshots: list[dict]) -> str:
+def _format_snapshots(snapshots: list[dict]) -> str:
     if not snapshots:
-        return "PLATFORM DATA: No recent snapshots available."
-
-    lines = ["PLATFORM PERFORMANCE DATA (last 28 days):"]
+        return "No recent platform data available."
+    lines = ["Platform performance data (last 28 days):"]
     for s in snapshots:
         platform = s.get("platform", "unknown")
         snap_date = s.get("snapshot_date", "")
         summary = s.get("summary_json") or {}
-
         lines.append(f"\n[{platform.upper()} — {snap_date}]")
-
         if platform == "ga4" and summary:
             totals = summary.get("totals", {})
-            lines.append(f"  Sessions: {totals.get('sessions', 'N/A')} | Active Users: {totals.get('active_users', 'N/A')} | Pageviews: {totals.get('pageviews', 'N/A')}")
-            channels = summary.get("channels", [])
+            lines.append(
+                f"  Sessions: {totals.get('sessions', 'N/A')} | "
+                f"Users: {totals.get('active_users', 'N/A')} | "
+                f"Pageviews: {totals.get('pageviews', 'N/A')}"
+            )
+            channels = summary.get("channels", [])[:3]
             if channels:
-                top = channels[:3]
-                lines.append(f"  Top channels: " + ", ".join(f"{c.get('source','?')} ({c.get('sessions', 0)} sessions)" for c in top))
-            top_pages = summary.get("top_pages", [])
+                lines.append(
+                    "  Top channels: "
+                    + ", ".join(
+                        f"{c.get('source','?')} ({c.get('sessions', 0)} sessions)"
+                        for c in channels
+                    )
+                )
+            top_pages = summary.get("top_pages", [])[:3]
             if top_pages:
-                lines.append(f"  Top pages: " + ", ".join(f"{p.get('page_url','?')} ({p.get('pageviews',0)} views)" for p in top_pages[:3]))
-
+                lines.append(
+                    "  Top pages: "
+                    + ", ".join(
+                        f"{p.get('page_url','?')} ({p.get('pageviews',0)} views)"
+                        for p in top_pages
+                    )
+                )
         elif "paid" in platform and summary:
             paid = summary.get("paid_ads", {})
             totals = paid.get("totals", {})
-            lines.append(f"  Spend: KES {totals.get('spend', 0):,.0f} | Impressions: {totals.get('impressions', 0):,} | Clicks: {totals.get('clicks', 0):,} | CTR: {totals.get('ctr', 0):.2%}")
-            by_channel = paid.get("by_channel", [])
+            lines.append(
+                f"  Spend: KES {totals.get('spend', 0):,.0f} | "
+                f"Impressions: {totals.get('impressions', 0):,} | "
+                f"CTR: {totals.get('ctr', 0):.2%}"
+            )
+            by_channel = paid.get("by_channel", [])[:3]
             if by_channel:
-                lines.append(f"  By channel: " + ", ".join(f"{c.get('channel','?')} KES{c.get('total_spend',0):,.0f}" for c in by_channel[:3]))
-            txn = summary.get("transactions", {})
-            txn_totals = txn.get("totals", {})
-            if txn_totals.get("total_revenue"):
-                lines.append(f"  Revenue: KES {txn_totals.get('total_revenue',0):,.0f} | Transactions: {txn_totals.get('total_transactions',0)}")
-
+                lines.append(
+                    "  By channel: "
+                    + ", ".join(
+                        f"{c.get('channel','?')} KES{c.get('total_spend',0):,.0f}"
+                        for c in by_channel
+                    )
+                )
+            txn = summary.get("transactions", {}).get("totals", {})
+            if txn.get("total_revenue"):
+                lines.append(
+                    f"  Revenue: KES {txn.get('total_revenue',0):,.0f} | "
+                    f"Transactions: {txn.get('total_transactions',0)}"
+                )
     return "\n".join(lines)
 
 
-def _build_briefs_section(briefs: list[dict]) -> str:
+def _format_briefs(briefs: list[dict]) -> str:
     if not briefs:
-        return ""
-    lines = ["\nRECENT CONTENT BRIEFS (avoid repeating these angles):"]
+        return "No recent content briefs found — all angles are available."
+    lines = ["Recent content briefs (avoid repeating these angles):"]
     for b in briefs:
         angle = b.get("content_angle") or b.get("hook") or "Untitled"
         platform = b.get("platform", "")
         lines.append(f"  - [{platform}] {angle}")
     return "\n".join(lines)
 
+
+# ---------------------------------------------------------------------------
+# Tool definitions
+# ---------------------------------------------------------------------------
+
+TOOLS = [
+    # 1. Server-side web search (Anthropic-hosted — no client execution needed)
+    {
+        "type": "web_search_20260209",
+        "name": "web_search",
+    },
+    # 2. Custom: internal platform data
+    {
+        "name": "get_platform_data",
+        "description": (
+            "Fetch internal platform performance data from BigQuery snapshots "
+            "for this Artcaffe concept. Returns GA4 website traffic data and "
+            "paid ads metrics. Call this to understand what content is working "
+            "and which channels are driving results."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "description": "Number of days of history to retrieve (default 28).",
+                },
+            },
+            "required": [],
+        },
+    },
+    # 3. Custom: recent content briefs
+    {
+        "name": "get_recent_briefs",
+        "description": (
+            "Fetch recent content briefs created for this Artcaffe concept. "
+            "Use this to see what content angles have already been covered "
+            "so you can avoid repetition and find fresh opportunities."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "description": "How many days back to look (default 30).",
+                },
+            },
+            "required": [],
+        },
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
 def run_research(
     *,
@@ -157,9 +245,10 @@ def run_research(
     concept_id: str,
 ) -> dict:
     """
-    Run the research agent for a concept.
+    Run the agentic research agent for a concept.
     Returns the saved research_brief row dict.
     """
+
     # 1. Brand context
     ctx = get_active(sb, concept_id)
     if not ctx:
@@ -168,40 +257,109 @@ def run_research(
             "Upload and process brand guidelines first."
         )
     brand_context = ctx.get("context_json") or ctx
-
-    # 2. Platform snapshots
-    snapshots = _fetch_snapshots(sb, concept_id)
-
-    # 3. Recent briefs (avoid repetition)
-    recent_briefs = _fetch_recent_briefs(sb, concept_id)
-
-    # 4. Build prompt
     today = date.today()
-    period_start = today - timedelta(days=28)
 
-    user_parts = [
-        "BRAND CONTEXT (JSON):",
-        json.dumps(brand_context, indent=2),
-        "",
-        _build_snapshot_section(snapshots),
-        _build_briefs_section(recent_briefs),
-        "",
-        f"Today is {today.isoformat()}. Identify 3-5 high-impact content opportunities for the next 1-2 weeks.",
-    ]
-    user_message = "\n".join(user_parts)
+    # 2. Client-side tool executor (handles our two custom tools)
+    def _execute_tool(name: str, tool_input: dict) -> str:
+        if name == "get_platform_data":
+            days = int(tool_input.get("days", 28))
+            snapshots = _fetch_snapshots(sb, concept_id, days=days)
+            return _format_snapshots(snapshots)
+        if name == "get_recent_briefs":
+            days = int(tool_input.get("days", 30))
+            briefs = _fetch_recent_briefs(sb, concept_id, days=days)
+            return _format_briefs(briefs)
+        return f"[tool not found: {name}]"
 
-    # 5. Call Claude Sonnet
-    response = anthropic.messages.create(
-        model=MODEL,
-        max_tokens=2000,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_message}],
-        timeout=60.0,
+    # 3. Inject brand context into system prompt
+    system_with_brand = (
+        f"{SYSTEM_PROMPT}\n\n"
+        f"BRAND CONTEXT (JSON):\n{json.dumps(brand_context, indent=2)}"
     )
-    raw = "".join(b.text for b in response.content if getattr(b, "type", "") == "text").strip()
 
-    # 6. Parse
-    parsed = _parse_json(raw)
+    # 4. Initial user message
+    brand_name = (
+        brand_context.get("brand_name", "Artcaffe")
+        if isinstance(brand_context, dict)
+        else "Artcaffe"
+    )
+    user_message = (
+        f"Research content opportunities for {brand_name}. "
+        f"Today is {today.isoformat()}. "
+        "Use all three tools to gather data, then output the JSON research brief."
+    )
+
+    messages: list[dict] = [{"role": "user", "content": user_message}]
+
+    # 5. Agentic loop
+    final_text = ""
+    max_iterations = 15  # safety cap
+
+    for iteration in range(max_iterations):
+        response = anthropic.messages.create(
+            model=MODEL,
+            max_tokens=4000,
+            system=system_with_brand,
+            tools=TOOLS,
+            messages=messages,
+            timeout=120.0,
+        )
+
+        # Always append the full assistant content (preserves tool_use blocks)
+        messages.append({"role": "assistant", "content": response.content})
+
+        print(
+            f"[research_agent] iteration={iteration} "
+            f"stop_reason={response.stop_reason}",
+            flush=True,
+        )
+
+        # ── Done ──────────────────────────────────────────────────────────────
+        if response.stop_reason == "end_turn":
+            for block in response.content:
+                if getattr(block, "type", None) == "text":
+                    final_text = block.text
+                    break
+            break
+
+        # ── Server-side tool loop paused (web_search hit iteration limit) ────
+        if response.stop_reason == "pause_turn":
+            # Re-send to continue the server-side loop
+            continue
+
+        # ── Custom tool calls ─────────────────────────────────────────────────
+        if response.stop_reason == "tool_use":
+            tool_results = []
+            for block in response.content:
+                if getattr(block, "type", None) == "tool_use":
+                    result_text = _execute_tool(block.name, block.input)
+                    print(
+                        f"[research_agent] executed tool={block.name} "
+                        f"→ {len(result_text)} chars",
+                        flush=True,
+                    )
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result_text,
+                        }
+                    )
+            if tool_results:
+                messages.append({"role": "user", "content": tool_results})
+            continue
+
+        # Unknown stop reason — exit
+        break
+
+    if not final_text:
+        raise RuntimeError(
+            "Research agent did not produce a final JSON response. "
+            f"Last stop_reason={response.stop_reason}"  # noqa: F821
+        )
+
+    # 6. Parse JSON from final text
+    parsed = _parse_json(final_text)
     opportunities = parsed.get("opportunities", [])
     summary = parsed.get("summary", "")
 
