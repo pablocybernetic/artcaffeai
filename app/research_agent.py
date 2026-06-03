@@ -210,8 +210,6 @@ def run_research(
     row = {
         "id": row_id,
         "concept_id": concept_id,
-        "period_start": period_start.isoformat(),
-        "period_end": today.isoformat(),
         "opportunities": opportunities,
         "summary": summary,
         "job_id": job_id,

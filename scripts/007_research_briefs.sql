@@ -7,14 +7,16 @@
 CREATE TABLE IF NOT EXISTS public.research_briefs (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   concept_id    uuid NOT NULL REFERENCES public.concepts(id),
-  period_start  date NOT NULL,
-  period_end    date NOT NULL,
   opportunities jsonb NOT NULL DEFAULT '[]',
   summary       text,
-  model         text,
   job_id        uuid REFERENCES public.jobs(id),
   created_at    timestamptz NOT NULL DEFAULT now()
 );
+
+-- Drop extra columns if they exist from an earlier run
+ALTER TABLE public.research_briefs DROP COLUMN IF EXISTS period_start;
+ALTER TABLE public.research_briefs DROP COLUMN IF EXISTS period_end;
+ALTER TABLE public.research_briefs DROP COLUMN IF EXISTS model;
 
 CREATE INDEX IF NOT EXISTS idx_research_briefs_concept
   ON public.research_briefs (concept_id, created_at DESC);
