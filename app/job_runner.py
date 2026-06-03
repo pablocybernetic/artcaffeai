@@ -204,6 +204,51 @@ def run_job(job_id: str) -> dict:
                 pass
             return {"ok": False, "job_id": job_id, "error": err}
 
+    # ------------------------------------------------------------------
+    # Market Research
+    # ------------------------------------------------------------------
+    if agent_type == "market_research":
+        from research_agent import run_research  # noqa: PLC0415
+        from notification_service import send_notification  # noqa: PLC0415
+
+        try:
+            _mark_running(job_id)
+
+            brief = run_research(
+                sb=sb,
+                anthropic=anthropic_client,
+                job_id=job_id,
+                concept_id=concept_id,
+            )
+            result_dict = {
+                "research_brief_id": brief["id"],
+                "n_opportunities": len(brief.get("opportunities", [])),
+            }
+            _mark_succeeded(job_id, result_dict)
+            try:
+                send_notification(
+                    sb,
+                    type="research_complete",
+                    subject="Artcaffe AI — Research brief ready",
+                    html=(
+                        f"<p>The Research Agent has identified "
+                        f"<strong>{result_dict['n_opportunities']} content opportunities</strong>. "
+                        f"Review them in the Briefs dashboard to start ideation.</p>"
+                    ),
+                    payload={"research_brief_id": brief["id"], "concept_id": concept_id},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return {"ok": True, "job_id": job_id, "result": result_dict}
+        except Exception as e:  # noqa: BLE001
+            err = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            print(f"[job_runner] FAILED {job_id}: {err}", file=sys.stderr, flush=True)
+            try:
+                _mark_failed(job_id, err)
+            except Exception:  # noqa: BLE001
+                pass
+            return {"ok": False, "job_id": job_id, "error": err}
+
     # Unknown agent type — skip
     return {"ok": True, "skipped": True, "reason": f"unknown_agent_type:{agent_type}"}
 
@@ -216,7 +261,7 @@ def _claim_next_pending() -> Optional[dict]:
         sb.table("jobs")
         .select("id")
         .eq("status", "pending")
-        .in_("agent_type", ["research", "ideation", "production"])
+        .in_("agent_type", ["research", "ideation", "production", "market_research"])
         .order("created_at", desc=False)
         .limit(1)
         .execute()

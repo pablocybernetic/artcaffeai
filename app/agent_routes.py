@@ -62,6 +62,10 @@ router = APIRouter(
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
+class ResearchRequest(BaseModel):
+    concept_id: str
+
+
 class IdeationRequest(BaseModel):
     brief_id: str
     concept_id: str
@@ -118,6 +122,36 @@ def _create_job(agent_type: str, concept_id: str, payload: dict[str, Any]) -> st
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+@router.post("/research")
+def start_research(req: ResearchRequest, bg: BackgroundTasks):
+    """
+    Enqueue a market research job for a concept.
+    The agent analyses platform data + brand context and surfaces
+    3-5 actionable content opportunities stored in research_briefs.
+    """
+    job_id = _create_job(
+        agent_type="market_research",
+        concept_id=req.concept_id,
+        payload={},
+    )
+    bg.add_task(run_job, job_id)
+    return {"ok": True, "job_id": job_id, "status": "queued"}
+
+
+@router.get("/research/{concept_id}")
+def list_research_briefs(concept_id: str):
+    """Return the 10 most recent research briefs for a concept."""
+    res = (
+        sb.table("research_briefs")
+        .select("id,concept_id,period_start,period_end,summary,opportunities,model,created_at")
+        .eq("concept_id", concept_id)
+        .order("created_at", desc=True)
+        .limit(10)
+        .execute()
+    )
+    return {"briefs": res.data or []}
+
 
 @router.post("/ideation")
 def start_ideation(req: IdeationRequest, bg: BackgroundTasks):
