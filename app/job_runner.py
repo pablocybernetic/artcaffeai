@@ -226,15 +226,45 @@ def run_job(job_id: str) -> dict:
             }
             _mark_succeeded(job_id, result_dict)
             try:
+                opportunities = brief.get("opportunities", [])
+                summary = brief.get("summary", "")
+                n = len(opportunities)
+
+                opp_rows = "".join(
+                    f"""<tr style="border-bottom:1px solid #eee">
+                      <td style="padding:10px 12px;font-size:13px;color:#1a1a1a">
+                        <strong>{o.get('opportunity','')}</strong><br>
+                        <span style="color:#666;font-size:12px">{o.get('hook','')}</span>
+                      </td>
+                      <td style="padding:10px 12px;font-size:12px;color:#444;white-space:nowrap;vertical-align:top">
+                        {o.get('platform','').replace('_',' ')}<br>
+                        <span style="background:{'#fee2e2' if o.get('priority')=='high' else '#fef9c3' if o.get('priority')=='medium' else '#f0fdf4'};color:{'#991b1b' if o.get('priority')=='high' else '#854d0e' if o.get('priority')=='medium' else '#166534'};padding:1px 6px;border-radius:4px;font-size:11px">{o.get('priority','')}</span>
+                      </td>
+                    </tr>"""
+                    for o in opportunities
+                )
+
+                html = f"""
+                <p>Hi,</p>
+                <p>The Research Agent has analysed your platform data and identified <strong>{n} content opportunities</strong>.</p>
+                {'<p style="color:#555;font-size:13px;border-left:3px solid #d1d5db;padding-left:12px;margin:16px 0">' + summary + '</p>' if summary else ''}
+                <table style="width:100%;border-collapse:collapse;margin:16px 0;font-family:sans-serif">
+                  <thead>
+                    <tr style="background:#f9fafb">
+                      <th style="padding:8px 12px;text-align:left;font-size:12px;color:#6b7280">Opportunity</th>
+                      <th style="padding:8px 12px;text-align:left;font-size:12px;color:#6b7280">Platform / Priority</th>
+                    </tr>
+                  </thead>
+                  <tbody>{opp_rows}</tbody>
+                </table>
+                <p><a href="{os.environ.get('DASHBOARD_URL','https://marketing.artcaffe.co.ke')}/briefs" style="background:#1a1a1a;color:#fff;padding:8px 16px;border-radius:6px;text-decoration:none">Open Briefs → Create from opportunities</a></p>
+                <p style="color:#999;font-size:12px">— Artcaffe AI</p>"""
+
                 send_notification(
                     sb,
                     type="research_complete",
-                    subject="Artcaffe AI — Research brief ready",
-                    html=(
-                        f"<p>The Research Agent has identified "
-                        f"<strong>{result_dict['n_opportunities']} content opportunities</strong>. "
-                        f"Review them in the Briefs dashboard to start ideation.</p>"
-                    ),
+                    subject=f"Artcaffe AI — {n} content opportunities ready",
+                    html=html,
                     payload={"research_brief_id": brief["id"], "concept_id": concept_id},
                 )
             except Exception:  # noqa: BLE001
