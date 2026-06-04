@@ -34,11 +34,10 @@ You are a senior data-driven marketing strategist for Artcaffe, a premium café 
 
 Your job: identify 3-5 high-impact content opportunities for the next 1-2 weeks.
 
-Workflow — use the tools in this order:
+Workflow — use both tools before synthesising:
 1. Call get_platform_data to understand internal performance (what is working, what is not).
 2. Call get_recent_briefs to see what angles have been covered recently (avoid repetition).
-3. Call web_search for current trends, events in Kenya/Nairobi, competitor activity, relevant cultural moments, and seasonal hooks.
-   Search 2-4 times with different queries (e.g. "Nairobi food trends June 2026", "Artcaffe Kenya competitor marketing", "Kenya cultural events this week").
+Then use your knowledge of Kenyan culture, Nairobi food trends, and seasonal moments to enrich the opportunities.
 
 After gathering sufficient data, write ONLY a JSON object in this exact shape:
 {
@@ -186,12 +185,7 @@ def _format_briefs(briefs: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 TOOLS = [
-    # 1. Server-side web search (Anthropic-hosted — no client execution needed)
-    {
-        "type": "web_search_20260209",
-        "name": "web_search",
-    },
-    # 2. Custom: internal platform data
+    # 1. Custom: internal platform data
     {
         "name": "get_platform_data",
         "description": (
@@ -302,7 +296,7 @@ def run_research(
             system=system_with_brand,
             tools=TOOLS,
             messages=messages,
-            timeout=120.0,
+            timeout=60.0,
         )
 
         # Always append the full assistant content (preserves tool_use blocks)
