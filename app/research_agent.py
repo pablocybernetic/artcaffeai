@@ -218,12 +218,14 @@ def run_research(
 
     # 6. Persist
     row_id = str(uuid.uuid4())
+    period_start = (date.today() - timedelta(days=28)).isoformat()
     row = {
         "id": row_id,
         "concept_id": concept_id,
         "opportunities": opportunities,
         "summary": summary,
         "job_id": job_id,
+        "week_start": period_start,
         "created_at": _now(),
     }
     res = sb.table("research_briefs").insert(row).execute()
