@@ -316,10 +316,24 @@ def run_research(
 
         # ── Done ──────────────────────────────────────────────────────────────
         if response.stop_reason == "end_turn":
-            for block in response.content:
-                if getattr(block, "type", None) == "text":
-                    final_text = block.text
-                    break
+            # Collect all text blocks; the JSON may span multiple blocks
+            # or appear after web_search result blocks.
+            text_parts = [
+                block.text
+                for block in response.content
+                if getattr(block, "type", None) == "text" and block.text.strip()
+            ]
+            final_text = "\n".join(text_parts)
+            if not final_text:
+                # If still empty, ask Claude to output the JSON now
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "You have finished gathering data. "
+                        "Now output ONLY the JSON research brief — no other text."
+                    ),
+                })
+                continue  # one more loop iteration to get the JSON
             break
 
         # ── Server-side tool loop paused (web_search hit iteration limit) ────
