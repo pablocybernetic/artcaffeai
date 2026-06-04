@@ -21,7 +21,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from supabase import Client
-
 from brand_context import get_active
 
 MODEL = "claude-haiku-4-5-20251001"
