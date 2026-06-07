@@ -27,12 +27,17 @@ You are a senior data-driven marketing strategist for Artcaffe, a premium café 
 
 Analyse the platform performance data and brand context provided, then identify the most compelling content opportunities for the next 1-2 weeks.
 
+You will be given up to 52 weeks of historical weekly performance data alongside recent snapshots. Use both to:
+- Identify seasonal patterns (e.g. school term starts, Kenyan public holidays, end-of-month spend cycles)
+- Spot year-over-year or quarter-over-quarter trends
+- Flag weeks where performance historically spikes or dips, so opportunities can pre-empt or capitalise on them
+
 Output ONLY a JSON object with this exact shape — no markdown fences, no prose:
 {
-  "summary": "2-3 sentence overview of current performance and the key theme across opportunities",
+  "summary": "2-3 sentence overview of current performance trends and the key theme across opportunities",
   "opportunities": [
     {
-      "signal": "specific data point or observation that motivates this opportunity",
+      "signal": "specific data point or trend observation (include dates/weeks if referencing historical data)",
       "opportunity": "clear description of the content opportunity",
       "content_angle": "the specific angle or message the content should take",
       "hook": "a compelling opening line or hook for the content",
@@ -46,7 +51,9 @@ Output ONLY a JSON object with this exact shape — no markdown fences, no prose
 
 Rules:
 - Base every opportunity on specific data signals — never invent metrics.
-- Avoid repeating angles already covered in recent briefs.
+- Avoid repeating angles already covered in recent briefs OR in previous research runs.
+- If previous research runs are shown, every opportunity you identify MUST be on a different topic, platform, or angle — no repeats at all.
+- Use historical weekly data to identify seasonality and trends, not just the most recent week.
 - Each opportunity must align with the brand voice and at least one messaging pillar.
 - Factor in Kenyan culture, Nairobi food scene, and seasonal moments where relevant.
 - Return 3-5 opportunities. Quality over quantity.
@@ -67,7 +74,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _fetch_snapshots(sb: Client, concept_id: str, days: int = 28) -> list[dict]:
+def _fetch_snapshots(sb: Client, concept_id: str, days: int = 365) -> list[dict]:
     since = (date.today() - timedelta(days=days)).isoformat()
     res = (
         sb.table("platform_data_snapshots")
@@ -75,7 +82,7 @@ def _fetch_snapshots(sb: Client, concept_id: str, days: int = 28) -> list[dict]:
         .eq("concept_id", concept_id)
         .gte("snapshot_date", since)
         .order("snapshot_date", desc=True)
-        .limit(20)
+        .limit(120)
         .execute()
     )
     return res.data or []
@@ -98,52 +105,90 @@ def _fetch_recent_briefs(sb: Client, concept_id: str, days: int = 30) -> list[di
 def _build_snapshot_section(snapshots: list[dict]) -> str:
     if not snapshots:
         return "PLATFORM DATA: No recent snapshots available."
-    lines = ["PLATFORM PERFORMANCE DATA (last 28 days):"]
+
+    # Group by platform so we can show recent detail + historical trend table
+    from collections import defaultdict
+    by_platform: dict[str, list[dict]] = defaultdict(list)
     for s in snapshots:
-        platform = s.get("platform", "unknown")
-        snap_date = s.get("snapshot_date", "")
-        summary = s.get("summary_json") or {}
-        lines.append(f"\n[{platform.upper()} — {snap_date}]")
-        if platform == "ga4" and summary:
-            totals = summary.get("totals", {})
-            lines.append(
-                f"  Sessions: {totals.get('sessions', 'N/A')} | "
-                f"Users: {totals.get('active_users', 'N/A')} | "
-                f"Pageviews: {totals.get('pageviews', 'N/A')}"
-            )
-            channels = summary.get("channels", [])[:3]
-            if channels:
+        by_platform[s.get("platform", "unknown")].append(s)
+
+    lines = [f"PLATFORM PERFORMANCE DATA ({len(snapshots)} weekly snapshots, most recent first):"]
+
+    for platform, rows in by_platform.items():
+        rows_sorted = sorted(rows, key=lambda r: r.get("snapshot_date", ""), reverse=True)
+        lines.append(f"\n── {platform.upper()} ──")
+
+        if platform == "ga4":
+            # Last 4 weeks detail
+            lines.append("  Recent weeks (detail):")
+            for s in rows_sorted[:4]:
+                summary = s.get("summary_json") or {}
+                totals = summary.get("totals", {})
+                channels = summary.get("channels", [])[:2]
+                ch_str = ", ".join(f"{c.get('source','?')}({c.get('sessions',0)})" for c in channels)
                 lines.append(
-                    "  Top channels: "
-                    + ", ".join(f"{c.get('source','?')} ({c.get('sessions', 0)} sessions)" for c in channels)
+                    f"  {s.get('snapshot_date','')}  "
+                    f"sessions={totals.get('sessions','?')}  "
+                    f"users={totals.get('active_users','?')}  "
+                    f"channels=[{ch_str}]"
                 )
-            top_pages = summary.get("top_pages", [])[:3]
-            if top_pages:
+            # Historical trend table (all remaining weeks)
+            if len(rows_sorted) > 4:
+                lines.append("  Historical weekly trend (sessions | users | pageviews):")
+                for s in rows_sorted[4:]:
+                    summary = s.get("summary_json") or {}
+                    t = summary.get("totals", {})
+                    lines.append(
+                        f"  {s.get('snapshot_date','')}  "
+                        f"{t.get('sessions','?')} | {t.get('active_users','?')} | {t.get('pageviews','?')}"
+                    )
+
+        elif "paid" in platform:
+            # Last 4 weeks detail
+            lines.append("  Recent weeks (detail):")
+            for s in rows_sorted[:4]:
+                summary = s.get("summary_json") or {}
+                paid = summary.get("paid_ads", {})
+                totals = paid.get("totals", {})
+                txn = summary.get("transactions", {}).get("totals", {})
+                by_ch = paid.get("by_channel", [])[:2]
+                ch_str = ", ".join(f"{c.get('channel','?')}(KES{c.get('total_spend',0):,.0f})" for c in by_ch)
                 lines.append(
-                    "  Top pages: "
-                    + ", ".join(f"{p.get('page_url','?')} ({p.get('pageviews',0)} views)" for p in top_pages)
+                    f"  {s.get('snapshot_date','')}  "
+                    f"spend=KES{totals.get('spend',0):,.0f}  "
+                    f"impressions={totals.get('impressions',0):,}  "
+                    f"ctr={totals.get('ctr',0):.2%}  "
+                    f"revenue=KES{txn.get('total_revenue',0):,.0f}  "
+                    f"channels=[{ch_str}]"
                 )
-        elif "paid" in platform and summary:
-            paid = summary.get("paid_ads", {})
-            totals = paid.get("totals", {})
-            lines.append(
-                f"  Spend: KES {totals.get('spend', 0):,.0f} | "
-                f"Impressions: {totals.get('impressions', 0):,} | "
-                f"CTR: {totals.get('ctr', 0):.2%}"
-            )
-            by_channel = paid.get("by_channel", [])[:3]
-            if by_channel:
-                lines.append(
-                    "  By channel: "
-                    + ", ".join(f"{c.get('channel','?')} KES{c.get('total_spend',0):,.0f}" for c in by_channel)
-                )
-            txn = summary.get("transactions", {}).get("totals", {})
-            if txn.get("total_revenue"):
-                lines.append(
-                    f"  Revenue: KES {txn.get('total_revenue',0):,.0f} | "
-                    f"Transactions: {txn.get('total_transactions',0)}"
-                )
+            # Historical trend table
+            if len(rows_sorted) > 4:
+                lines.append("  Historical weekly trend (spend KES | revenue KES | impressions):")
+                for s in rows_sorted[4:]:
+                    summary = s.get("summary_json") or {}
+                    paid = summary.get("paid_ads", {}).get("totals", {})
+                    txn = summary.get("transactions", {}).get("totals", {})
+                    lines.append(
+                        f"  {s.get('snapshot_date','')}  "
+                        f"{paid.get('spend',0):,.0f} | "
+                        f"{txn.get('total_revenue',0):,.0f} | "
+                        f"{paid.get('impressions',0):,}"
+                    )
+
     return "\n".join(lines)
+
+
+def _fetch_recent_research(sb: Client, concept_id: str) -> list[dict]:
+    """Fetch previous research runs so Claude avoids repeating the same opportunities."""
+    res = (
+        sb.table("research_briefs")
+        .select("opportunities,summary,created_at")
+        .eq("concept_id", concept_id)
+        .order("created_at", desc=True)
+        .limit(3)
+        .execute()
+    )
+    return res.data or []
 
 
 def _build_briefs_section(briefs: list[dict]) -> str:
@@ -154,6 +199,18 @@ def _build_briefs_section(briefs: list[dict]) -> str:
         angle = b.get("content_angle") or b.get("hook") or "Untitled"
         platform = b.get("platform", "")
         lines.append(f"  - [{platform}] {angle}")
+    return "\n".join(lines)
+
+
+def _build_previous_research_section(research_runs: list[dict]) -> str:
+    if not research_runs:
+        return ""
+    lines = ["\nPREVIOUS RESEARCH RUNS (you MUST identify completely different opportunities — do not repeat any angle, hook, or platform combination already listed here):"]
+    for i, run in enumerate(research_runs, 1):
+        lines.append(f"\n  Run {i} ({run.get('created_at','')[:10]}):")
+        opps = run.get("opportunities") or []
+        for o in opps:
+            lines.append(f"    - [{o.get('platform','')}] {o.get('opportunity','')} | Hook: {o.get('hook','')[:60]}")
     return "\n".join(lines)
 
 
@@ -181,6 +238,7 @@ def run_research(
     today = date.today()
     snapshots = _fetch_snapshots(sb, concept_id)
     recent_briefs = _fetch_recent_briefs(sb, concept_id)
+    previous_research = _fetch_recent_research(sb, concept_id)
 
     # 3. Build prompt
     user_parts = [
@@ -189,8 +247,9 @@ def run_research(
         "",
         _build_snapshot_section(snapshots),
         _build_briefs_section(recent_briefs),
+        _build_previous_research_section(previous_research),
         "",
-        f"Today is {today.isoformat()}. Identify 3-5 high-impact content opportunities for the next 1-2 weeks.",
+        f"Today is {today.isoformat()}. Identify 3-5 HIGH-IMPACT content opportunities that are COMPLETELY DIFFERENT from any previously identified above.",
     ]
     user_message = "\n".join(user_parts)
 
