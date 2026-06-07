@@ -148,17 +148,20 @@ def _build_snapshot_section(snapshots: list[dict]) -> str:
             lines.append("  Recent weeks (detail):")
             for s in rows_sorted[:4]:
                 summary = s.get("summary_json") or {}
-                paid = summary.get("paid_ads", {})
-                totals = paid.get("totals", {})
-                txn = summary.get("transactions", {}).get("totals", {})
-                by_ch = paid.get("by_channel", [])[:2]
-                ch_str = ", ".join(f"{c.get('channel','?')}(KES{c.get('total_spend',0):,.0f})" for c in by_ch)
+                paid = summary.get("paid_ads", {}) or {}
+                totals = paid.get("totals", {}) or {}
+                txn = (summary.get("transactions", {}) or {}).get("totals", {}) or {}
+                by_ch = (paid.get("by_channel") or [])[:2]
+                ch_str = ", ".join(
+                    f"{c.get('channel','?')}(KES{float(c.get('total_spend') or 0):,.0f})"
+                    for c in by_ch
+                )
                 lines.append(
                     f"  {s.get('snapshot_date','')}  "
-                    f"spend=KES{totals.get('spend',0):,.0f}  "
-                    f"impressions={totals.get('impressions',0):,}  "
-                    f"ctr={totals.get('ctr',0):.2%}  "
-                    f"revenue=KES{txn.get('total_revenue',0):,.0f}  "
+                    f"spend=KES{float(totals.get('spend') or 0):,.0f}  "
+                    f"impressions={int(totals.get('impressions') or 0):,}  "
+                    f"ctr={float(totals.get('ctr') or 0):.2%}  "
+                    f"revenue=KES{float(txn.get('total_revenue') or 0):,.0f}  "
                     f"channels=[{ch_str}]"
                 )
             # Historical trend table
@@ -166,13 +169,13 @@ def _build_snapshot_section(snapshots: list[dict]) -> str:
                 lines.append("  Historical weekly trend (spend KES | revenue KES | impressions):")
                 for s in rows_sorted[4:]:
                     summary = s.get("summary_json") or {}
-                    paid = summary.get("paid_ads", {}).get("totals", {})
-                    txn = summary.get("transactions", {}).get("totals", {})
+                    paid = (summary.get("paid_ads", {}) or {}).get("totals", {}) or {}
+                    txn = (summary.get("transactions", {}) or {}).get("totals", {}) or {}
                     lines.append(
                         f"  {s.get('snapshot_date','')}  "
-                        f"{paid.get('spend',0):,.0f} | "
-                        f"{txn.get('total_revenue',0):,.0f} | "
-                        f"{paid.get('impressions',0):,}"
+                        f"{float(paid.get('spend') or 0):,.0f} | "
+                        f"{float(txn.get('total_revenue') or 0):,.0f} | "
+                        f"{int(paid.get('impressions') or 0):,}"
                     )
 
     return "\n".join(lines)
