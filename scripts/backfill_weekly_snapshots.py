@@ -308,8 +308,8 @@ def main():
             try:
                 data = _pull_ads_week(bq, week_start, week_end)
                 _upsert(sb, concept_id, "paid_ads", week_start, data)
-                spend = data["paid_ads"]["totals"]["spend"]
-                rev   = data["transactions"]["totals"].get("total_revenue", 0)
+                spend = float(data["paid_ads"]["totals"].get("spend") or 0)
+                rev   = float(data["transactions"]["totals"].get("total_revenue") or 0)
                 print(f"  [ads]  {label}  spend=KES{spend:,.0f}  revenue=KES{rev:,.0f}  ✓")
                 total_ok += 1
             except Exception as e:
