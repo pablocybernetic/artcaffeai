@@ -51,7 +51,7 @@ def require_api_key(x_api_key: Optional[str] = Header(None)) -> None:
 
 router = APIRouter(prefix="/data", dependencies=[Depends(require_api_key)])
 
-DATA_AGENT_MODEL = "claude-haiku-4-5"
+DATA_AGENT_MODEL = "claude-sonnet-4-6"
 DATA_AGENT_SYSTEM_PROMPT = (
     "You are the Artcaffe Data Agent. Answer questions about platform performance "
     "using ONLY the snapshot data provided below. Be concise and direct. "
@@ -361,26 +361,26 @@ def chat(req: ChatRequest):
     if not ANTHROPIC_API_KEY:
         raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
 
-    cutoff = (date.today() - timedelta(days=14)).isoformat()
+    cutoff = (date.today() - timedelta(days=365)).isoformat()
     q = (
         sb.table("platform_data_snapshots")
         .select("platform,snapshot_date,summary_json")
         .gte("snapshot_date", cutoff)
         .order("snapshot_date", desc=True)
-        .limit(30)
+        .limit(120)
     )
     if req.concept_id:
         q = q.eq("concept_id", req.concept_id)
     snapshots = q.execute().data or []
 
-    context_blob = json.dumps(snapshots, default=str)[:50_000]
+    context_blob = json.dumps(snapshots, default=str)[:120_000]
     system = DATA_AGENT_SYSTEM_PROMPT.replace("[SNAPSHOTS injected at runtime]", f"SNAPSHOTS:\n{context_blob}")
 
     import anthropic  # type: ignore
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=25.0)
     resp = client.messages.create(
-        model="claude-haiku-4-5",
+        model=DATA_AGENT_MODEL,
         max_tokens=1500,
         system=system,
         messages=[{"role": m.role, "content": m.content} for m in req.messages],
