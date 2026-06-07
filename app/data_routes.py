@@ -356,6 +356,45 @@ def ga4_snapshot_alias(req: SnapshotRequest):
     return snapshot(req)
 
 
+def _slim(snapshot: dict) -> dict:
+    """Strip bulky daily-row arrays from summary_json so 52 weeks fit in the prompt.
+
+    Paid-ads snapshots store up to 200 daily campaign rows per week (~30 KB each).
+    We keep totals + channel breakdown — enough for trend analysis.
+    """
+    s = dict(snapshot)
+    summary = s.get("summary_json") or {}
+    platform = s.get("platform", "")
+
+    if platform == "ga4":
+        # Keep totals, channels (top 5), top_pages (top 5) — drop 'daily'
+        s["summary_json"] = {
+            "source":    summary.get("source"),
+            "range":     summary.get("range"),
+            "totals":    summary.get("totals"),
+            "channels":  (summary.get("channels") or [])[:5],
+            "top_pages": (summary.get("top_pages") or [])[:5],
+        }
+    elif "paid" in platform:
+        paid = summary.get("paid_ads") or {}
+        txn  = summary.get("transactions") or {}
+        s["summary_json"] = {
+            "source":  summary.get("source"),
+            "range":   summary.get("range"),
+            "paid_ads": {
+                "totals":     paid.get("totals"),
+                "by_channel": (paid.get("by_channel") or [])[:5],
+                # drop paid.daily — it's the expensive part
+            },
+            "transactions": {
+                "totals":    txn.get("totals"),
+                "by_source": (txn.get("by_source") or [])[:5],
+            },
+        }
+
+    return s
+
+
 @router.post("/chat")
 def chat(req: ChatRequest):
     if not ANTHROPIC_API_KEY:
@@ -373,7 +412,8 @@ def chat(req: ChatRequest):
         q = q.eq("concept_id", req.concept_id)
     snapshots = q.execute().data or []
 
-    context_blob = json.dumps(snapshots, default=str)[:120_000]
+    slimmed = [_slim(s) for s in snapshots]
+    context_blob = json.dumps(slimmed, default=str)[:200_000]
     system = DATA_AGENT_SYSTEM_PROMPT.replace("[SNAPSHOTS injected at runtime]", f"SNAPSHOTS:\n{context_blob}")
 
     import anthropic  # type: ignore
