@@ -4,16 +4,18 @@ research_agent.py
 Analyses platform performance data and brand context to surface
 3-5 actionable content opportunities per concept.
 
-Simple, reliable approach:
+Approach:
   1. Pre-fetch platform snapshots (Python → Supabase)
   2. Pre-fetch recent briefs (Python → Supabase)
-  3. Single Claude Sonnet call with all context
-  4. Parse JSON response → store in research_briefs
+  3. Run web research — DuckDuckGo searches for current Nairobi/Kenya trends
+  4. Single Claude Sonnet call with all context (data + web research)
+  5. Parse JSON response → store in research_briefs
 """
 from __future__ import annotations
 
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -51,6 +53,7 @@ Output ONLY a JSON object with this exact shape — no markdown fences, no prose
 
 Rules:
 - Base every opportunity on specific data signals — never invent metrics.
+- Cross-reference web research results with platform data — an opportunity backed by BOTH a data trend AND a current Nairobi/Kenya news signal is stronger than either alone.
 - Avoid repeating angles already covered in recent briefs OR in previous research runs.
 - If previous research runs are shown, every opportunity you identify MUST be on a different topic, platform, or angle — no repeats at all.
 - Use historical weekly data to identify seasonality and trends, not just the most recent week.
@@ -72,6 +75,64 @@ def _parse_json(text: str) -> Any:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Web research (DuckDuckGo — free, no API key required)
+# ---------------------------------------------------------------------------
+def _ddg_search(query: str, max_results: int = 5) -> list[dict]:
+    """Run a single DuckDuckGo text search. Returns [] on any failure."""
+    try:
+        from duckduckgo_search import DDGS  # noqa: PLC0415
+        with DDGS() as ddgs:
+            return [
+                {
+                    "title": r.get("title", ""),
+                    "snippet": (r.get("body") or "")[:300],
+                    "url": r.get("href", ""),
+                }
+                for r in ddgs.text(query, max_results=max_results, timelimit="m")
+            ]
+    except Exception:
+        return []
+
+
+def _fetch_web_research(today: date) -> str:
+    """
+    Run 4 targeted searches in parallel and return a formatted prompt section.
+    Each search targets a different research angle relevant to Artcaffe.
+    Returns empty string if all searches fail (graceful degradation).
+    """
+    month_year = today.strftime("%B %Y")
+    queries = {
+        "Nairobi food & café trends": f"Nairobi café restaurant food trends {month_year}",
+        "Kenya marketing & social media": f"Kenya social media marketing campaigns food brands {month_year}",
+        "Nairobi upcoming events": f"Nairobi events activities things to do {month_year}",
+        "Competitors & local food scene": "Artcaffe Kenya competitor cafe promotions deals 2026",
+    }
+
+    results_by_label: dict[str, list[dict]] = {}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(_ddg_search, q): label for label, q in queries.items()}
+        for future in as_completed(futures):
+            label = futures[future]
+            try:
+                results_by_label[label] = future.result()
+            except Exception:
+                results_by_label[label] = []
+
+    lines = []
+    for label, results in results_by_label.items():
+        if not results:
+            continue
+        lines.append(f"\n[{label}]")
+        for r in results:
+            if r.get("title") or r.get("snippet"):
+                lines.append(f"  • {r['title']}: {r['snippet']}")
+
+    if not lines:
+        return ""
+    return "\nWEB RESEARCH — current Nairobi/Kenya trends (use to identify timely opportunities):" + "\n".join(lines)
 
 
 def _fetch_snapshots(sb: Client, concept_id: str, days: int = 365) -> list[dict]:
@@ -237,11 +298,22 @@ def run_research(
         )
     brand_context = ctx.get("context_json") or ctx
 
-    # 2. Fetch data
+    # 2. Fetch data + web research in parallel
     today = date.today()
-    snapshots = _fetch_snapshots(sb, concept_id)
-    recent_briefs = _fetch_recent_briefs(sb, concept_id)
-    previous_research = _fetch_recent_research(sb, concept_id)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_snapshots   = pool.submit(_fetch_snapshots,       sb, concept_id)
+        f_briefs      = pool.submit(_fetch_recent_briefs,   sb, concept_id)
+        f_research    = pool.submit(_fetch_recent_research, sb, concept_id)
+        f_web         = pool.submit(_fetch_web_research,    today)
+
+        snapshots        = f_snapshots.result()
+        recent_briefs    = f_briefs.result()
+        previous_research = f_research.result()
+        web_research     = f_web.result()
+
+    print(f"[research_agent] snapshots={len(snapshots)} briefs={len(recent_briefs)} "
+          f"prev_runs={len(previous_research)} web_results={'yes' if web_research else 'none'}",
+          flush=True)
 
     # 3. Build prompt
     user_parts = [
@@ -251,10 +323,11 @@ def run_research(
         _build_snapshot_section(snapshots),
         _build_briefs_section(recent_briefs),
         _build_previous_research_section(previous_research),
+        web_research,
         "",
-        f"Today is {today.isoformat()}. Identify 3-5 HIGH-IMPACT content opportunities that are COMPLETELY DIFFERENT from any previously identified above.",
+        f"Today is {today.isoformat()}. Identify 3-5 HIGH-IMPACT content opportunities that are COMPLETELY DIFFERENT from any previously identified above. Where relevant, tie opportunities to the current trends and events found in the web research.",
     ]
-    user_message = "\n".join(user_parts)
+    user_message = "\n".join(p for p in user_parts if p)
 
     # 4. Single Claude call
     response = anthropic.messages.create(
