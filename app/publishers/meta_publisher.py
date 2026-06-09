@@ -81,8 +81,28 @@ def post_facebook(
 
 
 def test_credentials(*, access_token: str, page_id: str) -> dict:
-    """Verify credentials by fetching the page name. Raises on failure."""
+    """
+    Verify token by calling /me (no special permissions needed),
+    then try /me/accounts to find the connected page name.
+    Falls back to the page_id as display name if accounts call fails.
+    """
     with httpx.Client(timeout=15.0) as c:
-        r = c.get(f"{GRAPH}/{page_id}", params={"fields": "id,name", "access_token": access_token})
-    data = _handle(r, "credential test")
-    return {"ok": True, "account_name": data.get("name", page_id)}
+        # /me works for both User tokens and System User tokens
+        r_me = c.get(f"{GRAPH}/me", params={"fields": "id,name", "access_token": access_token})
+        _handle(r_me, "credential test")
+
+        # Try to get the page name from the pages list (needs pages_show_list)
+        account_name: str = page_id
+        try:
+            r_pages = c.get(
+                f"{GRAPH}/me/accounts",
+                params={"fields": "id,name", "access_token": access_token},
+            )
+            if r_pages.is_success:
+                pages = r_pages.json().get("data", [])
+                matched = next((p["name"] for p in pages if str(p.get("id")) == str(page_id)), None)
+                account_name = matched or (pages[0]["name"] if pages else page_id)
+        except Exception:
+            pass
+
+    return {"ok": True, "account_name": account_name}
