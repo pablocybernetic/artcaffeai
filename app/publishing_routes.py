@@ -429,13 +429,9 @@ def save_credentials(req: CredentialsSaveRequest):
         if req.page_id:
             row["page_id"] = req.page_id
 
-    # Upsert by platform (unique key)
-    existing = sb.table("platform_credentials").select("id").eq("platform", req.platform).maybe_single().execute()
-    if existing.data:
-        sb.table("platform_credentials").update(row).eq("platform", req.platform).execute()
-    else:
-        row["created_at"] = _now()
-        sb.table("platform_credentials").insert(row).execute()
+    # Upsert by platform unique key — avoids the insert-vs-update race and None-execute() issues
+    row["created_at"] = _now()
+    sb.table("platform_credentials").upsert(row, on_conflict="platform").execute()
 
     return {"ok": True, "platform": req.platform}
 
