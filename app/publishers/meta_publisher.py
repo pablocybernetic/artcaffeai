@@ -26,6 +26,32 @@ def _handle(resp: httpx.Response, context: str) -> dict:
     return resp.json()
 
 
+def _page_token(page_id: str, access_token: str, client: httpx.Client) -> str:
+    """
+    Exchange a System User token for a Page Access Token.
+
+    The Graph API requires a Page Access Token (not a System User token) for
+    posting to pages. System User tokens have all permissions but the subject
+    must be the page itself for page write operations.
+
+    Falls back to the original token if the exchange fails (e.g. the stored
+    token is already a Page Access Token).
+    """
+    try:
+        r = client.get(
+            f"{GRAPH}/{page_id}",
+            params={"fields": "access_token", "access_token": access_token},
+            timeout=10.0,
+        )
+        if r.is_success:
+            data = r.json()
+            if "access_token" in data:
+                return data["access_token"]
+    except Exception:
+        pass
+    return access_token
+
+
 def post_instagram(
     *,
     ig_user_id: str,
@@ -60,19 +86,22 @@ def post_facebook(
     message: str,
     image_url: Optional[str] = None,
 ) -> dict:
-    """Post a photo or text update to a Facebook Page."""
+    """Post a photo or text update to a Facebook Page using a Page Access Token."""
     with httpx.Client(timeout=45.0) as c:
+        # Exchange System User token → Page Access Token (required for page write ops)
+        page_access_token = _page_token(page_id, access_token, c)
+
         if image_url:
             r = c.post(
                 f"{GRAPH}/{page_id}/photos",
-                params={"url": image_url, "caption": message, "access_token": access_token},
+                params={"url": image_url, "caption": message, "access_token": page_access_token},
             )
             data = _handle(r, "photo post")
             post_id = data.get("post_id") or data.get("id", "")
         else:
             r = c.post(
                 f"{GRAPH}/{page_id}/feed",
-                params={"message": message, "access_token": access_token},
+                params={"message": message, "access_token": page_access_token},
             )
             post_id = _handle(r, "feed post")["id"]
 
@@ -82,27 +111,37 @@ def post_facebook(
 
 def test_credentials(*, access_token: str, page_id: str) -> dict:
     """
-    Verify token by calling /me (no special permissions needed),
-    then try /me/accounts to find the connected page name.
-    Falls back to the page_id as display name if accounts call fails.
+    Verify token is valid and the Page Access Token exchange works.
+    Uses /me to confirm the token, then exchanges for a Page Access Token
+    and fetches the page name to confirm posting rights.
     """
     with httpx.Client(timeout=15.0) as c:
-        # /me works for both User tokens and System User tokens
+        # Confirm the token is alive
         r_me = c.get(f"{GRAPH}/me", params={"fields": "id,name", "access_token": access_token})
         _handle(r_me, "credential test")
 
-        # Try to get the page name from the pages list (needs pages_show_list)
+        # Exchange for Page Access Token and fetch the page name
         account_name: str = page_id
         try:
-            r_pages = c.get(
-                f"{GRAPH}/me/accounts",
-                params={"fields": "id,name", "access_token": access_token},
+            page_token = _page_token(page_id, access_token, c)
+            r_page = c.get(
+                f"{GRAPH}/{page_id}",
+                params={"fields": "id,name", "access_token": page_token},
             )
-            if r_pages.is_success:
-                pages = r_pages.json().get("data", [])
-                matched = next((p["name"] for p in pages if str(p.get("id")) == str(page_id)), None)
-                account_name = matched or (pages[0]["name"] if pages else page_id)
+            if r_page.is_success:
+                account_name = r_page.json().get("name", page_id)
         except Exception:
-            pass
+            # Fall back to /me/accounts list
+            try:
+                r_pages = c.get(
+                    f"{GRAPH}/me/accounts",
+                    params={"fields": "id,name", "access_token": access_token},
+                )
+                if r_pages.is_success:
+                    pages = r_pages.json().get("data", [])
+                    matched = next((p["name"] for p in pages if str(p.get("id")) == str(page_id)), None)
+                    account_name = matched or (pages[0]["name"] if pages else page_id)
+            except Exception:
+                pass
 
     return {"ok": True, "account_name": account_name}
