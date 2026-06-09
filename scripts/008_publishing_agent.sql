@@ -12,9 +12,8 @@ CREATE INDEX IF NOT EXISTS idx_content_items_scheduled_at
   ON public.content_items (scheduled_at)
   WHERE scheduled_at IS NOT NULL;
 
--- 2. Add scheduled_publish to the agent_type enum
---    ALTER TYPE ... ADD VALUE cannot run inside a transaction,
---    so it must be run as a standalone statement.
+-- 2. Add scheduled_publish to the agent_type enum.
+--    ALTER TYPE ... ADD VALUE cannot run inside a transaction.
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -26,3 +25,9 @@ BEGIN
   END IF;
 END;
 $$;
+
+-- 3. Add extra_json to platform_credentials.
+--    Used by Twitter to store api_key_secret and access_token_secret
+--    (fields that don't map cleanly to existing columns).
+ALTER TABLE public.platform_credentials
+  ADD COLUMN IF NOT EXISTS extra_json jsonb DEFAULT '{}'::jsonb;

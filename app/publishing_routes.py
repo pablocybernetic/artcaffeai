@@ -12,11 +12,19 @@ Endpoints:
   POST  /publish/credentials           — save / update platform credentials
   POST  /publish/test/{platform}       — test credentials for a platform
   GET   /publish/history/{item_id}     — published post history for a content item
+
+Open-source publishing skills (see publishing_agent.py):
+  - DuckDuckGo hashtag research: finds trending Nairobi/Kenya food hashtags
+  - Claude Haiku caption optimisation: adapts caption per platform style/limits
+  These run before every publish and fall back gracefully if unavailable.
+
+Supported platforms:
+  instagram, facebook, linkedin, google_ads, twitter, whatsapp
 """
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -35,6 +43,14 @@ from publishers.linkedin_publisher import (
 from publishers.google_ads_publisher import (
     create_responsive_search_ad,
     test_credentials as test_google_ads,
+)
+from publishers.twitter_publisher import (
+    post_tweet,
+    test_credentials as test_twitter,
+)
+from publishers.whatsapp_publisher import (
+    post_whatsapp,
+    test_credentials as test_whatsapp,
 )
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
@@ -92,9 +108,19 @@ def _save_publish_result(
     }).execute()
 
 
-def _execute_publish(sb_client: Client, content_item_id: str, platforms: list[str]) -> dict:
+def _execute_publish(
+    sb_client: Client,
+    content_item_id: str,
+    platforms: list[str],
+    anthropic: Optional[Any] = None,
+) -> dict:
     """
     Core publish logic shared by the REST endpoint and the job_runner.
+
+    When anthropic client is provided, runs pre-publish skills (publishing_agent.py):
+      1. DuckDuckGo hashtag research
+      2. Claude Haiku caption optimisation per platform
+
     Returns {"ok": bool, "results": {platform: {...}}}
     """
     # Fetch content item
@@ -127,32 +153,41 @@ def _execute_publish(sb_client: Client, content_item_id: str, platforms: list[st
         if asset_res.data:
             image_url = asset_res.data[0].get("public_url")
 
-    # Build post text
     headline = item.get("headline") or ""
-    caption = item.get("caption") or item.get("body") or ""
+    raw_caption = item.get("caption") or item.get("body") or ""
     meta = item.get("metadata") or {}
-    hashtags = meta.get("hashtags") if isinstance(meta.get("hashtags"), list) else []
-    hashtag_str = " ".join(hashtags)
 
-    text_instagram = f"{headline}\n\n{caption}" + (f"\n\n{hashtag_str}" if hashtag_str else "")
-    text_linkedin = f"{headline}\n\n{caption}"
-    text_facebook = f"{headline}\n\n{caption}"
+    # --- Publishing Skills: optimise caption per platform ---
+    from publishing_agent import optimize_for_platforms  # noqa: PLC0415
+    platform_content = optimize_for_platforms(
+        anthropic=anthropic,
+        headline=headline,
+        caption=raw_caption,
+        platforms=platforms,
+        today=date.today(),
+    )
 
     results: dict[str, Any] = {}
 
     for platform in platforms:
         try:
+            optimised = platform_content.get(platform, {"caption": raw_caption, "hashtags": []})
+            opt_caption = optimised["caption"]
+            opt_hashtags = optimised["hashtags"]
+            hashtag_str = " ".join(opt_hashtags)
+
             if platform == "instagram":
                 creds = _get_creds("meta", sb_client)
                 if not creds:
                     raise RuntimeError("Meta credentials not configured")
                 if not image_url:
                     raise RuntimeError("Instagram requires an image — no image asset found on this content item")
+                text = f"{headline}\n\n{opt_caption}" + (f"\n\n{hashtag_str}" if hashtag_str else "")
                 r = post_instagram(
                     ig_user_id=creds["ig_user_id"],
                     access_token=creds["access_token"],
                     image_url=image_url,
-                    caption=text_instagram,
+                    caption=text,
                 )
                 _save_publish_result(sb_client=sb_client, content_item_id=content_item_id, concept_id=concept_id, platform=platform, result=r)
                 results[platform] = {"ok": True, **r}
@@ -161,10 +196,11 @@ def _execute_publish(sb_client: Client, content_item_id: str, platforms: list[st
                 creds = _get_creds("meta", sb_client)
                 if not creds:
                     raise RuntimeError("Meta credentials not configured")
+                text = f"{headline}\n\n{opt_caption}" + (f"\n\n{hashtag_str}" if hashtag_str else "")
                 r = post_facebook(
                     page_id=creds["page_id"],
                     access_token=creds["access_token"],
-                    message=text_facebook,
+                    message=text,
                     image_url=image_url,
                 )
                 _save_publish_result(sb_client=sb_client, content_item_id=content_item_id, concept_id=concept_id, platform=platform, result=r)
@@ -174,10 +210,44 @@ def _execute_publish(sb_client: Client, content_item_id: str, platforms: list[st
                 creds = _get_creds("linkedin", sb_client)
                 if not creds:
                     raise RuntimeError("LinkedIn credentials not configured")
+                text = f"{headline}\n\n{opt_caption}" + (f"\n\n{hashtag_str}" if hashtag_str else "")
                 r = post_linkedin(
                     org_id=creds["org_id"],
                     access_token=creds["access_token"],
-                    text=text_linkedin,
+                    text=text,
+                    image_url=image_url,
+                )
+                _save_publish_result(sb_client=sb_client, content_item_id=content_item_id, concept_id=concept_id, platform=platform, result=r)
+                results[platform] = {"ok": True, **r}
+
+            elif platform == "twitter":
+                creds = _get_creds("twitter", sb_client)
+                if not creds:
+                    raise RuntimeError("Twitter credentials not configured")
+                extra = creds.get("extra_json") or {}
+                tweet_text = opt_caption + (f" {hashtag_str}" if hashtag_str else "")
+                r = post_tweet(
+                    api_key=creds["developer_token"],
+                    api_key_secret=extra.get("api_key_secret", ""),
+                    access_token=creds["access_token"],
+                    access_token_secret=extra.get("access_token_secret", ""),
+                    text=tweet_text,
+                    image_url=image_url,
+                )
+                _save_publish_result(sb_client=sb_client, content_item_id=content_item_id, concept_id=concept_id, platform=platform, result=r)
+                results[platform] = {"ok": True, **r}
+
+            elif platform == "whatsapp":
+                creds = _get_creds("whatsapp", sb_client)
+                if not creds:
+                    raise RuntimeError("WhatsApp credentials not configured")
+                # phone_number_id stored in ig_user_id, to_number stored in page_id
+                text = f"{headline}\n\n{opt_caption}"
+                r = post_whatsapp(
+                    phone_number_id=creds["ig_user_id"],
+                    access_token=creds["access_token"],
+                    to_number=creds["page_id"],
+                    text=text,
                     image_url=image_url,
                 )
                 _save_publish_result(sb_client=sb_client, content_item_id=content_item_id, concept_id=concept_id, platform=platform, result=r)
@@ -190,7 +260,7 @@ def _execute_publish(sb_client: Client, content_item_id: str, platforms: list[st
                 headlines_list = [headline] if headline else ["Artcaffe — Premium Café"]
                 if meta.get("ad_headlines") and isinstance(meta["ad_headlines"], list):
                     headlines_list += [h[:30] for h in meta["ad_headlines"]]
-                descriptions_list = [caption[:90]] if caption else ["Visit Artcaffe for the best coffee in Nairobi."]
+                descriptions_list = [opt_caption[:90]] if opt_caption else ["Visit Artcaffe for the best coffee in Nairobi."]
                 r = create_responsive_search_ad(
                     access_token=creds["access_token"],
                     developer_token=creds["developer_token"],
@@ -237,17 +307,20 @@ class PublishRequest(BaseModel):
 
 
 class CredentialsSaveRequest(BaseModel):
-    platform: str                 # "meta" | "linkedin" | "google_ads"
+    platform: str                 # "meta" | "linkedin" | "google_ads" | "twitter" | "whatsapp"
     access_token: Optional[str] = None
-    page_id: Optional[str] = None          # Facebook Page ID
-    ig_user_id: Optional[str] = None       # Instagram User ID
+    page_id: Optional[str] = None          # Facebook Page ID  /  WhatsApp: to_number
+    ig_user_id: Optional[str] = None       # Instagram User ID / WhatsApp: phone_number_id
     org_id: Optional[str] = None           # LinkedIn Org ID
-    developer_token: Optional[str] = None  # Google Ads
+    developer_token: Optional[str] = None  # Google Ads / Twitter: api_key
     customer_id: Optional[str] = None      # Google Ads
     campaign_id: Optional[str] = None      # Google Ads
     ad_group_id: Optional[str] = None      # Google Ads
     final_url: Optional[str] = None        # Google Ads landing page URL
     account_name: Optional[str] = None     # display name
+    # Twitter extra fields stored in extra_json
+    api_key_secret: Optional[str] = None          # Twitter API Key Secret
+    access_token_secret: Optional[str] = None     # Twitter Access Token Secret
 
 
 class TestRequest(BaseModel):
@@ -262,10 +335,13 @@ class TestRequest(BaseModel):
 def publish_post(req: PublishRequest):
     """
     Publish a content item to the requested social platforms.
+    Runs publishing skills (caption optimisation + hashtag research) before posting.
     Returns per-platform results (ok/error).
     """
     try:
-        return _execute_publish(sb, req.content_item_id, req.platforms)
+        from anthropic import Anthropic  # noqa: PLC0415
+        anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY")) if os.environ.get("ANTHROPIC_API_KEY") else None
+        return _execute_publish(sb, req.content_item_id, req.platforms, anthropic=anthropic_client)
     except RuntimeError as e:
         raise HTTPException(404, str(e))
 
@@ -298,7 +374,7 @@ def get_credentials():
 @router.post("/credentials")
 def save_credentials(req: CredentialsSaveRequest):
     """Upsert platform credentials."""
-    VALID = {"meta", "linkedin", "google_ads"}
+    VALID = {"meta", "linkedin", "google_ads", "twitter", "whatsapp"}
     if req.platform not in VALID:
         raise HTTPException(400, f"platform must be one of {VALID}")
 
@@ -331,6 +407,24 @@ def save_credentials(req: CredentialsSaveRequest):
             row["ad_group_id"] = req.ad_group_id
         if req.final_url:
             row["final_url"] = req.final_url
+    elif req.platform == "twitter":
+        # API Key (consumer key) stored in developer_token
+        if req.developer_token:
+            row["developer_token"] = req.developer_token
+        # API Key Secret + Access Token Secret stored in extra_json
+        extra: dict[str, str] = {}
+        if req.api_key_secret:
+            extra["api_key_secret"] = req.api_key_secret
+        if req.access_token_secret:
+            extra["access_token_secret"] = req.access_token_secret
+        if extra:
+            row["extra_json"] = extra
+    elif req.platform == "whatsapp":
+        # phone_number_id stored in ig_user_id; to_number stored in page_id
+        if req.ig_user_id:
+            row["ig_user_id"] = req.ig_user_id
+        if req.page_id:
+            row["page_id"] = req.page_id
 
     # Upsert by platform (unique key)
     existing = sb.table("platform_credentials").select("id").eq("platform", req.platform).maybe_single().execute()
@@ -360,6 +454,19 @@ def test_platform(platform: str):
                 access_token=creds["access_token"],
                 developer_token=creds["developer_token"],
                 customer_id=creds["customer_id"],
+            )
+        elif platform == "twitter":
+            extra = creds.get("extra_json") or {}
+            result = test_twitter(
+                api_key=creds["developer_token"],
+                api_key_secret=extra.get("api_key_secret", ""),
+                access_token=creds["access_token"],
+                access_token_secret=extra.get("access_token_secret", ""),
+            )
+        elif platform == "whatsapp":
+            result = test_whatsapp(
+                phone_number_id=creds["ig_user_id"],
+                access_token=creds["access_token"],
             )
         else:
             raise HTTPException(400, f"Unknown platform: {platform}")

@@ -298,7 +298,7 @@ def run_job(job_id: str) -> dict:
             if not platforms:
                 raise RuntimeError("No platforms in job payload")
 
-            result = _execute_publish(sb, content_item_id, platforms)
+            result = _execute_publish(sb, content_item_id, platforms, anthropic=anthropic_client)
 
             # Mark brief as approved if not already
             if brief_id:
