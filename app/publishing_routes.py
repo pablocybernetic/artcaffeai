@@ -64,20 +64,22 @@ def _mask(token: Optional[str]) -> Optional[str]:
     return "●" * (len(token) - 6) + token[-6:]
 
 
-def _get_creds(platform: str) -> Optional[dict]:
-    res = sb.table("platform_credentials").select("*").eq("platform", platform).eq("is_active", True).maybe_single().execute()
+def _get_creds(platform: str, sb_client: Optional[Client] = None) -> Optional[dict]:
+    client = sb_client or sb
+    res = client.table("platform_credentials").select("*").eq("platform", platform).eq("is_active", True).maybe_single().execute()
     return res.data
 
 
 def _save_publish_result(
     *,
+    sb_client: Client,
     content_item_id: str,
     concept_id: Optional[str],
     platform: str,
     result: dict,
     error: Optional[str] = None,
 ) -> None:
-    sb.table("published_posts").insert({
+    sb_client.table("published_posts").insert({
         "content_item_id": content_item_id,
         "concept_id": concept_id,
         "platform": platform,
@@ -88,6 +90,141 @@ def _save_publish_result(
         "published_at": _now(),
         "created_at": _now(),
     }).execute()
+
+
+def _execute_publish(sb_client: Client, content_item_id: str, platforms: list[str]) -> dict:
+    """
+    Core publish logic shared by the REST endpoint and the job_runner.
+    Returns {"ok": bool, "results": {platform: {...}}}
+    """
+    # Fetch content item
+    item_res = (
+        sb_client.table("content_items")
+        .select("id,brief_id,headline,caption,body,platform,asset_ids,status,type,metadata")
+        .eq("id", content_item_id)
+        .single()
+        .execute()
+    )
+    if not item_res.data:
+        raise RuntimeError(f"Content item not found: {content_item_id}")
+    item: dict[str, Any] = item_res.data
+
+    # Fetch concept_id from brief
+    brief_res = sb_client.table("content_briefs").select("concept_id").eq("id", item["brief_id"]).single().execute()
+    concept_id: Optional[str] = brief_res.data.get("concept_id") if brief_res.data else None
+
+    # Resolve first asset image URL
+    image_url: Optional[str] = None
+    if item.get("asset_ids"):
+        asset_res = (
+            sb_client.table("assets")
+            .select("public_url")
+            .in_("id", item["asset_ids"])
+            .eq("asset_type", "image")
+            .limit(1)
+            .execute()
+        )
+        if asset_res.data:
+            image_url = asset_res.data[0].get("public_url")
+
+    # Build post text
+    headline = item.get("headline") or ""
+    caption = item.get("caption") or item.get("body") or ""
+    meta = item.get("metadata") or {}
+    hashtags = meta.get("hashtags") if isinstance(meta.get("hashtags"), list) else []
+    hashtag_str = " ".join(hashtags)
+
+    text_instagram = f"{headline}\n\n{caption}" + (f"\n\n{hashtag_str}" if hashtag_str else "")
+    text_linkedin = f"{headline}\n\n{caption}"
+    text_facebook = f"{headline}\n\n{caption}"
+
+    results: dict[str, Any] = {}
+
+    for platform in platforms:
+        try:
+            if platform == "instagram":
+                creds = _get_creds("meta", sb_client)
+                if not creds:
+                    raise RuntimeError("Meta credentials not configured")
+                if not image_url:
+                    raise RuntimeError("Instagram requires an image — no image asset found on this content item")
+                r = post_instagram(
+                    ig_user_id=creds["ig_user_id"],
+                    access_token=creds["access_token"],
+                    image_url=image_url,
+                    caption=text_instagram,
+                )
+                _save_publish_result(sb_client=sb_client, content_item_id=content_item_id, concept_id=concept_id, platform=platform, result=r)
+                results[platform] = {"ok": True, **r}
+
+            elif platform == "facebook":
+                creds = _get_creds("meta", sb_client)
+                if not creds:
+                    raise RuntimeError("Meta credentials not configured")
+                r = post_facebook(
+                    page_id=creds["page_id"],
+                    access_token=creds["access_token"],
+                    message=text_facebook,
+                    image_url=image_url,
+                )
+                _save_publish_result(sb_client=sb_client, content_item_id=content_item_id, concept_id=concept_id, platform=platform, result=r)
+                results[platform] = {"ok": True, **r}
+
+            elif platform == "linkedin":
+                creds = _get_creds("linkedin", sb_client)
+                if not creds:
+                    raise RuntimeError("LinkedIn credentials not configured")
+                r = post_linkedin(
+                    org_id=creds["org_id"],
+                    access_token=creds["access_token"],
+                    text=text_linkedin,
+                    image_url=image_url,
+                )
+                _save_publish_result(sb_client=sb_client, content_item_id=content_item_id, concept_id=concept_id, platform=platform, result=r)
+                results[platform] = {"ok": True, **r}
+
+            elif platform == "google_ads":
+                creds = _get_creds("google_ads", sb_client)
+                if not creds:
+                    raise RuntimeError("Google Ads credentials not configured")
+                headlines_list = [headline] if headline else ["Artcaffe — Premium Café"]
+                if meta.get("ad_headlines") and isinstance(meta["ad_headlines"], list):
+                    headlines_list += [h[:30] for h in meta["ad_headlines"]]
+                descriptions_list = [caption[:90]] if caption else ["Visit Artcaffe for the best coffee in Nairobi."]
+                r = create_responsive_search_ad(
+                    access_token=creds["access_token"],
+                    developer_token=creds["developer_token"],
+                    customer_id=creds["customer_id"],
+                    ad_group_id=creds["ad_group_id"],
+                    headlines=headlines_list,
+                    descriptions=descriptions_list,
+                    final_url=creds.get("final_url") or "https://artcaffe.co.ke",
+                )
+                _save_publish_result(sb_client=sb_client, content_item_id=content_item_id, concept_id=concept_id, platform=platform, result=r)
+                results[platform] = {"ok": True, **r}
+
+            else:
+                results[platform] = {"ok": False, "error": f"Unknown platform: {platform}"}
+
+        except Exception as exc:
+            error_msg = str(exc)
+            _save_publish_result(
+                sb_client=sb_client,
+                content_item_id=content_item_id,
+                concept_id=concept_id,
+                platform=platform,
+                result={},
+                error=error_msg,
+            )
+            results[platform] = {"ok": False, "error": error_msg}
+
+    # Mark content item and brief as published if all platforms succeeded
+    all_ok = all(v.get("ok") for v in results.values())
+    if all_ok:
+        sb_client.table("content_items").update({"status": "approved", "updated_at": _now()}).eq("id", content_item_id).execute()
+        sb_client.table("content_briefs").update({"stage": "published", "updated_at": _now()}).eq("id", item["brief_id"]).execute()
+
+    return {"ok": all_ok, "results": results}
 
 
 # ---------------------------------------------------------------------------
@@ -127,136 +264,10 @@ def publish_post(req: PublishRequest):
     Publish a content item to the requested social platforms.
     Returns per-platform results (ok/error).
     """
-    # Fetch content item
-    item_res = (
-        sb.table("content_items")
-        .select("id,brief_id,headline,caption,body,platform,asset_ids,status,type,metadata")
-        .eq("id", req.content_item_id)
-        .single()
-        .execute()
-    )
-    if not item_res.data:
-        raise HTTPException(404, f"Content item not found: {req.content_item_id}")
-    item: dict[str, Any] = item_res.data
-
-    # Fetch concept_id from brief
-    brief_res = sb.table("content_briefs").select("concept_id").eq("id", item["brief_id"]).single().execute()
-    concept_id: Optional[str] = brief_res.data.get("concept_id") if brief_res.data else None
-
-    # Resolve first asset image URL
-    image_url: Optional[str] = None
-    if item.get("asset_ids"):
-        asset_res = (
-            sb.table("assets")
-            .select("public_url")
-            .in_("id", item["asset_ids"])
-            .eq("asset_type", "image")
-            .limit(1)
-            .execute()
-        )
-        if asset_res.data:
-            image_url = asset_res.data[0].get("public_url")
-
-    # Build post text: headline + caption
-    headline = item.get("headline") or ""
-    caption = item.get("caption") or item.get("body") or ""
-    meta = item.get("metadata") or {}
-    hashtags = meta.get("hashtags") if isinstance(meta.get("hashtags"), list) else []
-    hashtag_str = " ".join(hashtags)
-
-    text_instagram = f"{headline}\n\n{caption}" + (f"\n\n{hashtag_str}" if hashtag_str else "")
-    text_linkedin = f"{headline}\n\n{caption}"
-    text_facebook = f"{headline}\n\n{caption}"
-
-    results: dict[str, Any] = {}
-
-    for platform in req.platforms:
-        try:
-            if platform == "instagram":
-                creds = _get_creds("meta")
-                if not creds:
-                    raise RuntimeError("Meta credentials not configured")
-                if not image_url:
-                    raise RuntimeError("Instagram requires an image — no image asset found on this content item")
-                r = post_instagram(
-                    ig_user_id=creds["ig_user_id"],
-                    access_token=creds["access_token"],
-                    image_url=image_url,
-                    caption=text_instagram,
-                )
-                _save_publish_result(content_item_id=req.content_item_id, concept_id=concept_id, platform=platform, result=r)
-                results[platform] = {"ok": True, **r}
-
-            elif platform == "facebook":
-                creds = _get_creds("meta")
-                if not creds:
-                    raise RuntimeError("Meta credentials not configured")
-                r = post_facebook(
-                    page_id=creds["page_id"],
-                    access_token=creds["access_token"],
-                    message=text_facebook,
-                    image_url=image_url,
-                )
-                _save_publish_result(content_item_id=req.content_item_id, concept_id=concept_id, platform=platform, result=r)
-                results[platform] = {"ok": True, **r}
-
-            elif platform == "linkedin":
-                creds = _get_creds("linkedin")
-                if not creds:
-                    raise RuntimeError("LinkedIn credentials not configured")
-                r = post_linkedin(
-                    org_id=creds["org_id"],
-                    access_token=creds["access_token"],
-                    text=text_linkedin,
-                    image_url=image_url,
-                )
-                _save_publish_result(content_item_id=req.content_item_id, concept_id=concept_id, platform=platform, result=r)
-                results[platform] = {"ok": True, **r}
-
-            elif platform == "google_ads":
-                creds = _get_creds("google_ads")
-                if not creds:
-                    raise RuntimeError("Google Ads credentials not configured")
-                # Build up to 15 headlines and 4 descriptions
-                headlines_list = [headline] if headline else ["Artcaffe — Premium Café"]
-                # Add any extra headline variations from metadata
-                if meta.get("ad_headlines") and isinstance(meta["ad_headlines"], list):
-                    headlines_list += [h[:30] for h in meta["ad_headlines"]]
-                descriptions_list = [caption[:90]] if caption else ["Visit Artcaffe for the best coffee in Nairobi."]
-                r = create_responsive_search_ad(
-                    access_token=creds["access_token"],
-                    developer_token=creds["developer_token"],
-                    customer_id=creds["customer_id"],
-                    ad_group_id=creds["ad_group_id"],
-                    headlines=headlines_list,
-                    descriptions=descriptions_list,
-                    final_url=creds.get("final_url") or "https://artcaffe.co.ke",
-                )
-                _save_publish_result(content_item_id=req.content_item_id, concept_id=concept_id, platform=platform, result=r)
-                results[platform] = {"ok": True, **r}
-
-            else:
-                results[platform] = {"ok": False, "error": f"Unknown platform: {platform}"}
-
-        except Exception as exc:
-            error_msg = str(exc)
-            _save_publish_result(
-                content_item_id=req.content_item_id,
-                concept_id=concept_id,
-                platform=platform,
-                result={},
-                error=error_msg,
-            )
-            results[platform] = {"ok": False, "error": error_msg}
-
-    # Mark content item as published if all platforms succeeded
-    all_ok = all(v.get("ok") for v in results.values())
-    if all_ok:
-        sb.table("content_items").update({"status": "approved", "updated_at": _now()}).eq("id", req.content_item_id).execute()
-        # Update brief stage to published
-        sb.table("content_briefs").update({"stage": "published", "updated_at": _now()}).eq("id", item["brief_id"]).execute()
-
-    return {"ok": all_ok, "results": results}
+    try:
+        return _execute_publish(sb, req.content_item_id, req.platforms)
+    except RuntimeError as e:
+        raise HTTPException(404, str(e))
 
 
 @router.get("/credentials")

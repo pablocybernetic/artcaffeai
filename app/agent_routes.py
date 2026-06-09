@@ -95,6 +95,17 @@ class AnalyzeAssetRequest(BaseModel):
     asset_id: str
 
 
+class PublishNowRequest(BaseModel):
+    brief_id: str
+    platforms: list[str]  # e.g. ["instagram", "facebook", "linkedin", "google_ads"]
+
+
+class SchedulePublishRequest(BaseModel):
+    brief_id: str
+    platforms: list[str]
+    publish_at: str  # ISO 8601 UTC timestamp, e.g. "2026-06-10T09:00:00Z"
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -263,6 +274,92 @@ def update_item_status(item_id: str, body: ItemStatusUpdate, bg: BackgroundTasks
         bg.add_task(_notify)
 
     return {"ok": True, "updated": item}
+
+
+@router.post("/publish")
+def publish_now(req: PublishNowRequest, bg: BackgroundTasks):
+    """
+    Approve a brief and immediately publish its content to the selected platforms.
+    Finds the most recent content_item for the brief, runs publishing in the background.
+    """
+    # Find the most recent content item for this brief
+    item_res = (
+        sb.table("content_items")
+        .select("id")
+        .eq("brief_id", req.brief_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not item_res.data:
+        raise HTTPException(404, f"No content items found for brief: {req.brief_id}")
+    content_item_id = item_res.data[0]["id"]
+
+    brief_res = sb.table("content_briefs").select("concept_id").eq("id", req.brief_id).single().execute()
+    if not brief_res.data:
+        raise HTTPException(404, f"Brief not found: {req.brief_id}")
+    concept_id: str = brief_res.data["concept_id"]
+
+    job_id = _create_job(
+        agent_type="scheduled_publish",
+        concept_id=concept_id,
+        payload={
+            "content_item_id": content_item_id,
+            "platforms": req.platforms,
+            "brief_id": req.brief_id,
+        },
+    )
+    bg.add_task(run_job, job_id)
+    return {"ok": True, "job_id": job_id, "content_item_id": content_item_id, "status": "queued"}
+
+
+@router.post("/schedule")
+def schedule_publish(req: SchedulePublishRequest):
+    """
+    Approve a brief and schedule its content for publishing at a future time.
+    The job_runner poller will fire it once publish_at is reached.
+    """
+    item_res = (
+        sb.table("content_items")
+        .select("id")
+        .eq("brief_id", req.brief_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not item_res.data:
+        raise HTTPException(404, f"No content items found for brief: {req.brief_id}")
+    content_item_id = item_res.data[0]["id"]
+
+    brief_res = sb.table("content_briefs").select("concept_id").eq("id", req.brief_id).single().execute()
+    if not brief_res.data:
+        raise HTTPException(404, f"Brief not found: {req.brief_id}")
+    concept_id: str = brief_res.data["concept_id"]
+
+    job_id = _create_job(
+        agent_type="scheduled_publish",
+        concept_id=concept_id,
+        payload={
+            "content_item_id": content_item_id,
+            "platforms": req.platforms,
+            "brief_id": req.brief_id,
+            "publish_at": req.publish_at,
+        },
+    )
+
+    # Store scheduled_at on the content item so the calendar can display it
+    sb.table("content_items").update({
+        "scheduled_at": req.publish_at,
+        "updated_at": _now(),
+    }).eq("id", content_item_id).execute()
+
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "content_item_id": content_item_id,
+        "publish_at": req.publish_at,
+        "status": "scheduled",
+    }
 
 
 @router.get("/prompts")

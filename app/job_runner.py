@@ -279,6 +279,71 @@ def run_job(job_id: str) -> dict:
                 pass
             return {"ok": False, "job_id": job_id, "error": err}
 
+    # ------------------------------------------------------------------
+    # Scheduled Publish
+    # ------------------------------------------------------------------
+    if agent_type == "scheduled_publish":
+        from publishing_routes import _execute_publish  # noqa: PLC0415
+        from notification_service import send_notification  # noqa: PLC0415
+
+        try:
+            _mark_running(job_id)
+
+            content_item_id = payload.get("content_item_id")
+            platforms = payload.get("platforms") or []
+            brief_id = payload.get("brief_id")
+
+            if not content_item_id:
+                raise RuntimeError("No content_item_id in job payload")
+            if not platforms:
+                raise RuntimeError("No platforms in job payload")
+
+            result = _execute_publish(sb, content_item_id, platforms)
+
+            # Mark brief as approved if not already
+            if brief_id:
+                brief_res = sb.table("content_briefs").select("approval_status").eq("id", brief_id).maybe_single().execute()
+                if brief_res.data and brief_res.data.get("approval_status") != "approved":
+                    sb.table("content_briefs").update({
+                        "approval_status": "approved",
+                        "approved_at": _now(),
+                        "content_status": "approved",
+                        "updated_at": _now(),
+                    }).eq("id", brief_id).execute()
+
+            result_dict = {
+                "content_item_id": content_item_id,
+                "platforms": platforms,
+                "publish_results": result,
+            }
+            _mark_succeeded(job_id, result_dict)
+
+            try:
+                ok_platforms = [p for p, v in result.get("results", {}).items() if v.get("ok")]
+                fail_platforms = [p for p, v in result.get("results", {}).items() if not v.get("ok")]
+                status_line = f"Published to: {', '.join(ok_platforms)}" if ok_platforms else "No platforms published successfully"
+                if fail_platforms:
+                    status_line += f" | Failed: {', '.join(fail_platforms)}"
+                send_notification(
+                    sb,
+                    type="publish_complete",
+                    subject=f"Artcaffe AI — Content published ({', '.join(ok_platforms or platforms)})",
+                    html=f"<p>Content item <code>{content_item_id}</code> has been published.</p><p>{status_line}</p>",
+                    payload=result_dict,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+            return {"ok": True, "job_id": job_id, "result": result_dict}
+        except Exception as e:  # noqa: BLE001
+            err = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            print(f"[job_runner] FAILED {job_id}: {err}", file=sys.stderr, flush=True)
+            try:
+                _mark_failed(job_id, err)
+            except Exception:  # noqa: BLE001
+                pass
+            return {"ok": False, "job_id": job_id, "error": err}
+
     # Unknown agent type — skip
     return {"ok": True, "skipped": True, "reason": f"unknown_agent_type:{agent_type}"}
 
@@ -287,17 +352,23 @@ def run_job(job_id: str) -> dict:
 # Standalone poller (systemd worker mode)
 # ---------------------------------------------------------------------------
 def _claim_next_pending() -> Optional[dict]:
+    now_iso = _now()
     res = (
         sb.table("jobs")
-        .select("id")
+        .select("id,agent_type,input_payload")
         .eq("status", "pending")
-        .in_("agent_type", ["research", "ideation", "production", "market_research"])
+        .in_("agent_type", ["research", "ideation", "production", "market_research", "scheduled_publish"])
         .order("created_at", desc=False)
-        .limit(1)
+        .limit(20)
         .execute()
     )
-    rows = res.data or []
-    return rows[0] if rows else None
+    for row in (res.data or []):
+        if row.get("agent_type") == "scheduled_publish":
+            publish_at = (row.get("input_payload") or {}).get("publish_at")
+            if publish_at and publish_at > now_iso:
+                continue  # not yet due
+        return {"id": row["id"]}
+    return None
 
 
 def main() -> None:
