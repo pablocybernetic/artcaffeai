@@ -81,9 +81,12 @@ def _mask(token: Optional[str]) -> Optional[str]:
 
 
 def _get_creds(platform: str, sb_client: Optional[Client] = None) -> Optional[dict]:
-    client = sb_client or sb
-    res = client.table("platform_credentials").select("*").eq("platform", platform).eq("is_active", True).maybe_single().execute()
-    return res.data
+    try:
+        client = sb_client or sb
+        res = client.table("platform_credentials").select("*").eq("platform", platform).eq("is_active", True).maybe_single().execute()
+        return res.data if res is not None else None
+    except Exception:
+        return None
 
 
 def _save_publish_result(
@@ -131,13 +134,13 @@ def _execute_publish(
         .single()
         .execute()
     )
-    if not item_res.data:
+    if item_res is None or not item_res.data:
         raise RuntimeError(f"Content item not found: {content_item_id}")
     item: dict[str, Any] = item_res.data
 
     # Fetch concept_id from brief
     brief_res = sb_client.table("content_briefs").select("concept_id").eq("id", item["brief_id"]).single().execute()
-    concept_id: Optional[str] = brief_res.data.get("concept_id") if brief_res.data else None
+    concept_id: Optional[str] = (brief_res.data or {}).get("concept_id") if brief_res is not None else None
 
     # Resolve first asset image URL
     image_url: Optional[str] = None
@@ -150,7 +153,7 @@ def _execute_publish(
             .limit(1)
             .execute()
         )
-        if asset_res.data:
+        if asset_res is not None and asset_res.data:
             image_url = asset_res.data[0].get("public_url")
 
     headline = item.get("headline") or ""
