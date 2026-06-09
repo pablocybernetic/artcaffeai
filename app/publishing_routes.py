@@ -182,7 +182,11 @@ def _execute_publish(
             if platform == "instagram":
                 creds = _get_creds("meta", sb_client)
                 if not creds:
-                    raise RuntimeError("Meta credentials not configured")
+                    raise RuntimeError("Meta credentials not configured — add them in Settings → Social publishing")
+                if not creds.get("ig_user_id"):
+                    raise RuntimeError("Instagram User ID missing — edit Meta credentials in Settings and fill in the Instagram User ID field")
+                if not creds.get("access_token"):
+                    raise RuntimeError("Meta access token missing — edit Meta credentials in Settings")
                 if not image_url:
                     raise RuntimeError("Instagram requires an image — no image asset found on this content item")
                 text = f"{headline}\n\n{opt_caption}" + (f"\n\n{hashtag_str}" if hashtag_str else "")
@@ -198,7 +202,11 @@ def _execute_publish(
             elif platform == "facebook":
                 creds = _get_creds("meta", sb_client)
                 if not creds:
-                    raise RuntimeError("Meta credentials not configured")
+                    raise RuntimeError("Meta credentials not configured — add them in Settings → Social publishing")
+                if not creds.get("page_id"):
+                    raise RuntimeError("Facebook Page ID missing — edit Meta credentials in Settings and fill in the Facebook Page ID field")
+                if not creds.get("access_token"):
+                    raise RuntimeError("Meta access token missing — edit Meta credentials in Settings")
                 text = f"{headline}\n\n{opt_caption}" + (f"\n\n{hashtag_str}" if hashtag_str else "")
                 r = post_facebook(
                     page_id=creds["page_id"],
