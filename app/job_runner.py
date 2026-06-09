@@ -319,16 +319,63 @@ def run_job(job_id: str) -> dict:
             _mark_succeeded(job_id, result_dict)
 
             try:
-                ok_platforms = [p for p, v in result.get("results", {}).items() if v.get("ok")]
-                fail_platforms = [p for p, v in result.get("results", {}).items() if not v.get("ok")]
-                status_line = f"Published to: {', '.join(ok_platforms)}" if ok_platforms else "No platforms published successfully"
-                if fail_platforms:
-                    status_line += f" | Failed: {', '.join(fail_platforms)}"
+                per_platform = result.get("results", {})
+                ok_platforms  = [p for p, v in per_platform.items() if v.get("ok")]
+                fail_platforms = [p for p, v in per_platform.items() if not v.get("ok")]
+
+                # Build per-platform rows for the email table
+                platform_rows = ""
+                for p in platforms:
+                    v = per_platform.get(p, {})
+                    if v.get("ok"):
+                        post_url = v.get("post_url") or ""
+                        link = f'<a href="{post_url}" style="color:#166534">View post →</a>' if post_url else "—"
+                        platform_rows += f"""
+                        <tr style="border-bottom:1px solid #eee">
+                          <td style="padding:8px 12px;font-size:13px">{p}</td>
+                          <td style="padding:8px 12px">
+                            <span style="background:#f0fdf4;color:#166534;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600">Published</span>
+                          </td>
+                          <td style="padding:8px 12px;font-size:12px;color:#555">{link}</td>
+                        </tr>"""
+                    else:
+                        err_msg = v.get("error") or "Unknown error"
+                        platform_rows += f"""
+                        <tr style="border-bottom:1px solid #eee">
+                          <td style="padding:8px 12px;font-size:13px">{p}</td>
+                          <td style="padding:8px 12px">
+                            <span style="background:#fef2f2;color:#991b1b;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600">Failed</span>
+                          </td>
+                          <td style="padding:8px 12px;font-size:12px;color:#991b1b">{err_msg}</td>
+                        </tr>"""
+
+                all_ok = len(fail_platforms) == 0
+                subject_status = "published" if all_ok else (
+                    f"{len(ok_platforms)}/{len(platforms)} published" if ok_platforms else "all platforms failed"
+                )
+                subject = f"Artcaffe AI — {subject_status.capitalize()} ({', '.join(ok_platforms or platforms)})"
+
+                html = f"""
+                <p>Publishing job for content item <code style="background:#f3f4f6;padding:2px 6px;border-radius:3px">{content_item_id[:8]}…</code> completed.</p>
+                <table style="width:100%;border-collapse:collapse;margin:16px 0;font-family:sans-serif">
+                  <thead>
+                    <tr style="background:#f9fafb">
+                      <th style="padding:8px 12px;text-align:left;font-size:12px;color:#6b7280">Platform</th>
+                      <th style="padding:8px 12px;text-align:left;font-size:12px;color:#6b7280">Status</th>
+                      <th style="padding:8px 12px;text-align:left;font-size:12px;color:#6b7280">Detail / Error</th>
+                    </tr>
+                  </thead>
+                  <tbody>{platform_rows}</tbody>
+                </table>
+                {"<p style='color:#166534'>✓ All platforms published successfully.</p>" if all_ok else
+                 f"<p style='color:#991b1b'>⚠ {len(fail_platforms)} platform(s) failed. Check credentials in Settings → Publishing.</p>"}
+                <p style="color:#999;font-size:12px">— Artcaffe AI</p>"""
+
                 send_notification(
                     sb,
                     type="publish_complete",
-                    subject=f"Artcaffe AI — Content published ({', '.join(ok_platforms or platforms)})",
-                    html=f"<p>Content item <code>{content_item_id}</code> has been published.</p><p>{status_line}</p>",
+                    subject=subject,
+                    html=html,
                     payload=result_dict,
                 )
             except Exception:  # noqa: BLE001
