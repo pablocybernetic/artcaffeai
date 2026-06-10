@@ -89,7 +89,7 @@ def _pick_placement(image_bytes: bytes, anthropic: Any) -> str:
 
         resp = anthropic.messages.create(
             model=_PLACEMENT_MODEL,
-            max_tokens=5,
+            max_tokens=10,
             messages=[{
                 "role": "user",
                 "content": [
@@ -100,16 +100,21 @@ def _pick_placement(image_bytes: bytes, anthropic: Any) -> str:
                     {
                         "type": "text",
                         "text": (
-                            "For this marketing photo, where should a bold white headline "
-                            "text bar be placed to be most readable and visually balanced? "
-                            "Reply with exactly one word: top, center, or bottom."
+                            "For this marketing photo, where is the darkest, simplest, or most "
+                            "open area to place a white headline? Avoid areas with existing text, "
+                            "logos, or busy detail. Reply with exactly one word: "
+                            "top, upper-third, center, lower-third, or bottom."
                         ),
                     },
                 ],
             }],
         )
         answer = resp.content[0].text.strip().lower()
-        if "top" in answer:
+        if "upper" in answer:
+            placement = "upper-third"
+        elif "lower" in answer:
+            placement = "lower-third"
+        elif "top" in answer:
             placement = "top"
         elif "center" in answer or "middle" in answer:
             placement = "center"
@@ -198,36 +203,40 @@ def overlay_headline(
         scrim_h = total_text_h + padding_y * 2
         margin = int(H * 0.022)
 
-        # Scrim position based on Claude's choice
+        # Text anchor Y based on Claude's placement choice
         if placement == "top":
-            scrim_top = margin
-            scrim_bottom = scrim_top + scrim_h
+            text_y = margin + padding_y
+        elif placement == "upper-third":
+            text_y = int(H * 0.18)
         elif placement == "center":
-            scrim_top = (H - scrim_h) // 2
-            scrim_bottom = scrim_top + scrim_h
+            text_y = (H - total_text_h) // 2
+        elif placement == "lower-third":
+            text_y = int(H * 0.62)
         else:  # bottom
-            scrim_bottom = H - margin
-            scrim_top = scrim_bottom - scrim_h
+            text_y = H - total_text_h - padding_y - margin
 
-        # ── Draw overlay ────────────────────────────────────────────
+        # ── Draw text with outline-shadow (no background scrim) ─────
         overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
 
-        draw.rectangle([(0, scrim_top), (W, scrim_bottom)], fill=(8, 8, 8, 178))
+        # Shadow offsets: render black text in a ring around the letter
+        # for a solid outline effect readable on any background
+        shadow_offsets = [
+            (dx, dy)
+            for dx in range(-3, 4)
+            for dy in range(-3, 4)
+            if abs(dx) + abs(dy) <= 4 and (dx or dy)
+        ]
 
-        # Thin accent rule on the open edge of the scrim
-        rule_y = scrim_bottom if placement == "top" else scrim_top
-        draw.rectangle(
-            [(int(W * 0.08), rule_y), (int(W * 0.92), rule_y + 2)],
-            fill=(255, 255, 255, 120),
-        )
-
-        y = scrim_top + padding_y
+        y = text_y
         for line in lines:
             bb = draw.textbbox((0, 0), line, font=h_font)
             lw = bb[2] - bb[0]
             x = (W - lw) // 2
-            draw.text((x + 2, y + 2), line, font=h_font, fill=(0, 0, 0, 140))
+            # Outline/shadow pass
+            for dx, dy in shadow_offsets:
+                draw.text((x + dx, y + dy), line, font=h_font, fill=(0, 0, 0, 200))
+            # Main white text
             draw.text((x, y), line, font=h_font, fill=(255, 255, 255, 255))
             y += lh + line_gap
 
