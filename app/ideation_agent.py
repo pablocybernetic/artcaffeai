@@ -75,6 +75,7 @@ def _fetch_assets(sb: Client, concept_id: str) -> list[dict]:
         .select("id,filename,asset_type,public_url,platform,metadata,analysis_status")
         .eq("concept_id", concept_id)
         .in_("asset_type", ["image", "video"])
+        .is_("generator", "null")  # exclude AI-generated/composited assets
         .order("created_at", desc=True)
         .limit(40)
         .execute()
