@@ -28,6 +28,7 @@ import httpx
 from supabase import Client
 
 from brand_context import get_active
+from image_overlay import overlay_headline
 
 # ---------------------------------------------------------------------------
 # Config
@@ -265,6 +266,9 @@ def run_image_generation(
         key_override=image_api_key,
         provider_override=image_provider_override,
     )
+
+    # 3b. Burn headline text onto the image using brand fonts from storage
+    image_bytes = overlay_headline(image_bytes, headline, sb)
 
     # 4. Upload to storage
     bucket, storage_path, public_url = _upload_to_storage(sb, image_bytes, concept_id)
