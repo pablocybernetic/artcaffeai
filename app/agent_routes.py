@@ -25,7 +25,7 @@ from supabase import Client, create_client
 import os
 
 from job_runner import run_job
-from image_agent import run_image_generation, select_best_asset
+from image_agent import run_image_generation, select_best_asset, apply_overlay_to_asset
 from image_analysis_agent import analyze_asset as _analyze_asset
 
 # ---------------------------------------------------------------------------
@@ -510,6 +510,13 @@ def generate_banner(req: BannerRequest):
                     headline=req.headline,
                     caption=req.caption,
                     platform=req.platform,
+                )
+                asset = apply_overlay_to_asset(
+                    sb=sb,
+                    asset=asset,
+                    headline=req.headline,
+                    concept_id=req.concept_id,
+                    content_item_id=req.content_item_id,
                 )
                 return {"ok": True, "asset": asset, "mode": "selected"}
             except RuntimeError as fe:

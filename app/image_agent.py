@@ -391,3 +391,67 @@ def select_best_asset(
                 }).eq("id", content_item_id).execute()
 
     return {**asset, "_mode": "selected"}
+
+
+# ---------------------------------------------------------------------------
+# Apply overlay to an existing (selected) asset
+# ---------------------------------------------------------------------------
+def apply_overlay_to_asset(
+    *,
+    sb: Client,
+    asset: dict,
+    headline: str,
+    concept_id: str,
+    content_item_id: str | None,
+) -> dict:
+    """
+    Download an existing asset image, burn the headline onto it, re-upload
+    as a new asset row and attach it to content_item_id.
+    Returns the new asset dict, or the original asset if anything fails.
+    """
+    import httpx  # noqa: PLC0415
+
+    public_url = asset.get("public_url", "")
+    if not public_url:
+        return asset
+
+    try:
+        r = httpx.get(public_url, timeout=30.0)
+        r.raise_for_status()
+        composited = overlay_headline(r.content, headline, sb)
+
+        bucket, storage_path, new_url = _upload_to_storage(sb, composited, concept_id)
+        filename = storage_path.split("/")[-1]
+
+        new_asset: dict = {
+            "concept_id": concept_id,
+            "filename": filename,
+            "asset_type": "image",
+            "platform": asset.get("platform", "instagram"),
+            "public_url": new_url,
+            "created_at": _now(),
+        }
+        insert_res = sb.table("assets").insert(new_asset).execute()
+        saved = insert_res.data[0] if insert_res.data else new_asset
+
+        if content_item_id and saved.get("id"):
+            item_res = (
+                sb.table("content_items")
+                .select("asset_ids")
+                .eq("id", content_item_id)
+                .single()
+                .execute()
+            )
+            if item_res.data:
+                existing = item_res.data.get("asset_ids") or []
+                sb.table("content_items").update({
+                    "asset_ids": list({*existing, saved["id"]}),
+                    "updated_at": _now(),
+                }).eq("id", content_item_id).execute()
+
+        print(f"[image_agent] overlay applied to selected asset → {new_url}", flush=True)
+        return {**saved, "_mode": "selected_with_overlay", "_original_asset_id": asset.get("id")}
+
+    except Exception as exc:
+        print(f"[image_agent] overlay on selected asset failed, returning original: {exc}", flush=True)
+        return asset
