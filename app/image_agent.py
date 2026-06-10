@@ -268,7 +268,7 @@ def run_image_generation(
     )
 
     # 3b. Burn headline text onto the image using brand fonts from storage
-    image_bytes = overlay_headline(image_bytes, headline, sb)
+    image_bytes = overlay_headline(image_bytes, headline, sb, anthropic=anthropic)
 
     # 4. Upload to storage
     bucket, storage_path, public_url = _upload_to_storage(sb, image_bytes, concept_id)
@@ -401,6 +401,7 @@ def select_best_asset(
 def apply_overlay_to_asset(
     *,
     sb: Client,
+    anthropic: Any = None,
     asset: dict,
     headline: str,
     concept_id: str,
@@ -420,7 +421,7 @@ def apply_overlay_to_asset(
     try:
         r = httpx.get(public_url, timeout=30.0)
         r.raise_for_status()
-        composited = overlay_headline(r.content, headline, sb)
+        composited = overlay_headline(r.content, headline, sb, anthropic=anthropic)
 
         bucket, storage_path, new_url = _upload_to_storage(sb, composited, concept_id)
         filename = storage_path.split("/")[-1]

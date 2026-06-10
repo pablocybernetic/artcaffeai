@@ -513,6 +513,7 @@ def generate_banner(req: BannerRequest):
                 )
                 asset = apply_overlay_to_asset(
                     sb=sb,
+                    anthropic=anthropic_client,
                     asset=asset,
                     headline=req.headline,
                     concept_id=req.concept_id,

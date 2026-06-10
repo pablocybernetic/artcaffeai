@@ -5,19 +5,21 @@ Burns headline text onto a banner image using the brand fonts stored in
 Supabase Storage.  Called by image_agent after the raw image is generated
 and before it is uploaded.
 
-Design: bottom-third semi-transparent scrim + white ALL-CAPS headline text
-centred horizontally, using the first available Gotham variant (or any font
-found in the bucket, falling back to Pillow's built-in font).
+Claude vision (Haiku) analyses the image and picks the best placement
+(top / center / bottom) based on where there is the most open, dark, or
+uncluttered space.  Falls back to bottom if the vision call fails.
 """
 from __future__ import annotations
 
+import base64
 import io
 import os
-from typing import Optional
+from typing import Any, Optional
 
 from supabase import Client
 
 FONTS_BUCKET = os.environ.get("FONTS_BUCKET", "fonts")
+_PLACEMENT_MODEL = "claude-haiku-4-5-20251001"
 
 # Preferred font order for headlines
 _FONT_PREFERENCE = [
@@ -35,7 +37,6 @@ _FONT_PREFERENCE = [
 # ---------------------------------------------------------------------------
 
 def _fetch_best_font_bytes(sb: Client) -> Optional[bytes]:
-    """Download the best available brand font from storage. Returns None on failure."""
     candidates = list(_FONT_PREFERENCE)
     try:
         listing = sb.storage.from_(FONTS_BUCKET).list("", {"limit": 100})
@@ -58,9 +59,7 @@ def _fetch_best_font_bytes(sb: Client) -> Optional[bytes]:
 
 
 def _pil_font(font_bytes: Optional[bytes], size: int):
-    """Create a PIL ImageFont at the given size. Falls back to default."""
-    from PIL import ImageFont  # local import — Pillow may not be installed on all envs
-
+    from PIL import ImageFont
     if font_bytes:
         try:
             return ImageFont.truetype(io.BytesIO(font_bytes), size)
@@ -70,11 +69,64 @@ def _pil_font(font_bytes: Optional[bytes], size: int):
 
 
 # ---------------------------------------------------------------------------
+# Claude vision — pick best placement
+# ---------------------------------------------------------------------------
+
+def _pick_placement(image_bytes: bytes, anthropic: Any) -> str:
+    """
+    Send a small version of the image to Claude Haiku and ask where to place
+    the headline text.  Returns 'top', 'center', or 'bottom'.
+    """
+    try:
+        from PIL import Image  # local import
+
+        # Resize to 512px wide for a cheap vision call
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        img.thumbnail((512, 512))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=70)
+        b64 = base64.standard_b64encode(buf.getvalue()).decode()
+
+        resp = anthropic.messages.create(
+            model=_PLACEMENT_MODEL,
+            max_tokens=5,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "For this marketing photo, where should a bold white headline "
+                            "text bar be placed to be most readable and visually balanced? "
+                            "Reply with exactly one word: top, center, or bottom."
+                        ),
+                    },
+                ],
+            }],
+        )
+        answer = resp.content[0].text.strip().lower()
+        if "top" in answer:
+            placement = "top"
+        elif "center" in answer or "middle" in answer:
+            placement = "center"
+        else:
+            placement = "bottom"
+        print(f"[image_overlay] Claude chose placement: {placement}", flush=True)
+        return placement
+    except Exception as exc:
+        print(f"[image_overlay] placement vision call failed, using bottom: {exc}", flush=True)
+        return "bottom"
+
+
+# ---------------------------------------------------------------------------
 # Text wrapping
 # ---------------------------------------------------------------------------
 
 def _wrap(text: str, font, max_px: int, draw) -> list[str]:
-    """Split text into lines that fit within max_px."""
     words = text.split()
     lines: list[str] = []
     current = ""
@@ -100,37 +152,38 @@ def overlay_headline(
     image_bytes: bytes,
     headline: str,
     sb: Client,
+    *,
+    anthropic: Any = None,
 ) -> bytes:
     """
     Overlay the headline on the image as white text over a dark scrim.
+    If anthropic client is provided, Claude picks the best placement.
     Returns composited PNG bytes.  On any error returns the original bytes.
     """
     try:
-        from PIL import Image, ImageDraw  # local import
+        from PIL import Image, ImageDraw
     except ImportError:
         print("[image_overlay] Pillow not installed — skipping text overlay", flush=True)
         return image_bytes
 
     try:
+        # Ask Claude where to place the text
+        placement = _pick_placement(image_bytes, anthropic) if anthropic else "bottom"
+
         img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
         W, H = img.size
 
         font_bytes = _fetch_best_font_bytes(sb)
-
-        # Headline font size: ~5.5% of width, min 36px, max 90px
         headline_size = max(36, min(90, int(W * 0.055)))
         h_font = _pil_font(font_bytes, headline_size)
 
         padding_x = int(W * 0.06)
-        padding_y = int(H * 0.04)
+        padding_y = int(H * 0.038)
         max_text_w = W - padding_x * 2
 
-        # Scratch draw for measuring
         scratch = ImageDraw.Draw(img.copy())
-
         text = headline.upper()
         lines = _wrap(text, h_font, max_text_w, scratch)
-        # Cap at 3 lines
         if len(lines) > 3:
             lines = lines[:3]
             lines[-1] = lines[-1].rstrip() + "…"
@@ -141,24 +194,31 @@ def overlay_headline(
 
         lh = line_height(h_font)
         line_gap = int(lh * 0.25)
-
         total_text_h = lh * len(lines) + line_gap * (len(lines) - 1)
         scrim_h = total_text_h + padding_y * 2
-        scrim_top = H - scrim_h - int(H * 0.025)
+        margin = int(H * 0.022)
+
+        # Scrim position based on Claude's choice
+        if placement == "top":
+            scrim_top = margin
+            scrim_bottom = scrim_top + scrim_h
+        elif placement == "center":
+            scrim_top = (H - scrim_h) // 2
+            scrim_bottom = scrim_top + scrim_h
+        else:  # bottom
+            scrim_bottom = H - margin
+            scrim_top = scrim_bottom - scrim_h
 
         # ── Draw overlay ────────────────────────────────────────────
         overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
 
-        # Semi-transparent dark scrim
-        draw.rectangle(
-            [(0, scrim_top), (W, H - int(H * 0.018))],
-            fill=(8, 8, 8, 178),  # ~70 % opacity
-        )
+        draw.rectangle([(0, scrim_top), (W, scrim_bottom)], fill=(8, 8, 8, 178))
 
-        # White headline text — one thin bright line above the scrim for polish
+        # Thin accent rule on the open edge of the scrim
+        rule_y = scrim_bottom if placement == "top" else scrim_top
         draw.rectangle(
-            [(int(W * 0.08), scrim_top), (int(W * 0.92), scrim_top + 2)],
+            [(int(W * 0.08), rule_y), (int(W * 0.92), rule_y + 2)],
             fill=(255, 255, 255, 120),
         )
 
@@ -167,9 +227,7 @@ def overlay_headline(
             bb = draw.textbbox((0, 0), line, font=h_font)
             lw = bb[2] - bb[0]
             x = (W - lw) // 2
-            # Soft shadow for depth
             draw.text((x + 2, y + 2), line, font=h_font, fill=(0, 0, 0, 140))
-            # Main text
             draw.text((x, y), line, font=h_font, fill=(255, 255, 255, 255))
             y += lh + line_gap
 
@@ -177,7 +235,7 @@ def overlay_headline(
         buf = io.BytesIO()
         result.save(buf, format="PNG", optimize=True)
         data = buf.getvalue()
-        print(f"[image_overlay] overlay applied — {len(data) // 1024} KB", flush=True)
+        print(f"[image_overlay] overlay applied ({placement}) — {len(data) // 1024} KB", flush=True)
         return data
 
     except Exception as exc:
