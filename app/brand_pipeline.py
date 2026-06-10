@@ -16,6 +16,7 @@ This module is pure logic: it does NOT know about FastAPI or HTTP.
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import re
@@ -108,6 +109,16 @@ def _extract_docx(raw: bytes) -> str:
 
 
 # ---------- AI structuring ----------
+def _parse_claude_response(msg: Any) -> dict[str, Any]:
+    body = "".join(
+        block.text for block in msg.content if getattr(block, "type", "") == "text"
+    ).strip()
+    if body.startswith("```"):
+        body = re.sub(r"^```(?:json)?\s*", "", body)
+        body = re.sub(r"\s*```$", "", body)
+    return json.loads(body)
+
+
 def structure_with_ai(
     anthropic: Anthropic,
     *,
@@ -115,23 +126,51 @@ def structure_with_ai(
     model: str,
     max_chars: int = 120_000,
 ) -> dict[str, Any]:
-    """Call Claude and return parsed JSON. Raises on invalid JSON."""
+    """Call Claude with extracted text and return parsed JSON."""
     msg = anthropic.messages.create(
         model=model,
         max_tokens=4096,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": text[:max_chars]}],
     )
-    body = "".join(
-        block.text for block in msg.content if getattr(block, "type", "") == "text"
-    ).strip()
+    return _parse_claude_response(msg)
 
-    # Tolerate ```json fences
-    if body.startswith("```"):
-        body = re.sub(r"^```(?:json)?\s*", "", body)
-        body = re.sub(r"\s*```$", "", body)
 
-    return json.loads(body)
+def structure_with_ai_pdf(
+    anthropic: Anthropic,
+    *,
+    pdf_bytes: bytes,
+    model: str,
+) -> dict[str, Any]:
+    """
+    Send the PDF directly to Claude using native document vision.
+    Used when pypdf cannot extract text (design-heavy, Canva, scanned PDFs).
+    Claude reads the visual layout including text rendered as vectors/images.
+    """
+    pdf_b64 = base64.standard_b64encode(pdf_bytes).decode("utf-8")
+    msg = anthropic.messages.create(
+        model=model,
+        max_tokens=4096,
+        system=SYSTEM_PROMPT,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": pdf_b64,
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": "Extract and structure the brand guidelines from this document into the JSON format specified.",
+                },
+            ],
+        }],
+    )
+    return _parse_claude_response(msg)
 
 
 # ---------- top-level pipeline ----------
@@ -144,11 +183,25 @@ def run_pipeline(
     inp: PipelineInput,
 ) -> PipelineResult:
     raw = sb.storage.from_(bucket).download(inp.file_path)
-    text = extract_text(raw, inp.mime_type, inp.file_name)
-    if not text.strip():
-        raise RuntimeError("No text extracted from document")
 
-    structured = structure_with_ai(anthropic, text=text, model=model)
+    name = inp.file_name.lower()
+    is_pdf = inp.mime_type == "application/pdf" or name.endswith(".pdf")
+
+    text = extract_text(raw, inp.mime_type, inp.file_name)
+
+    if text.strip():
+        # Text layer found — use fast text path
+        structured = structure_with_ai(anthropic, text=text, model=model)
+    elif is_pdf:
+        # Design-heavy or scanned PDF (Canva, InDesign exports, etc.)
+        # Fall back to Claude's native PDF vision
+        print(f"[brand_pipeline] pypdf returned no text for {inp.file_name!r}, using PDF vision fallback", flush=True)
+        structured = structure_with_ai_pdf(anthropic, pdf_bytes=raw, model=model)
+    else:
+        raise RuntimeError(
+            f"No text extracted from {inp.file_name!r}. "
+            "Please upload a PDF, DOCX, PNG, or JPG of your brand guidelines."
+        )
 
     row = replace_active(
         sb,
