@@ -37,7 +37,7 @@ MODEL = "claude-haiku-4-5-20251001"
 IMAGE_PROVIDER = os.environ.get("IMAGE_PROVIDER", "openai")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 IDEOGRAM_API_KEY = os.environ.get("IDEOGRAM_API_KEY")
-ASSETS_BUCKET = os.environ.get("ASSETS_BUCKET", "assets")
+ASSETS_BUCKET = os.environ.get("ASSETS_BUCKET", "generated-assets")
 FALLBACK_BUCKET = os.environ.get("BRAND_BUCKET", "brand-guidelines")
 
 # ---------------------------------------------------------------------------
@@ -280,6 +280,7 @@ def run_image_generation(
     asset_row: dict = {
         "concept_id": concept_id,
         "filename": filename,
+        "storage_path": storage_path,
         "asset_type": "image",
         "platform": platform,
         "public_url": public_url,
@@ -426,6 +427,7 @@ def apply_overlay_to_asset(
         new_asset: dict = {
             "concept_id": concept_id,
             "filename": filename,
+            "storage_path": storage_path,
             "asset_type": "image",
             "platform": asset.get("platform", "instagram"),
             "public_url": new_url,
