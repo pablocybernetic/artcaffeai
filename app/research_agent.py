@@ -27,39 +27,53 @@ MODEL = "claude-sonnet-4-6"
 SYSTEM_PROMPT = """\
 You are a senior data-driven marketing strategist for Artcaffe, a premium café brand in Nairobi, Kenya.
 
-Analyse the platform performance data and brand context provided, then identify the most compelling content opportunities for the next 1-2 weeks.
+Your job is to identify the most compelling content opportunities for the next 1-2 weeks by combining three inputs:
+  1. Artcaffe's own platform performance data (BigQuery/GA4/paid)
+  2. Competitor and global brand intelligence (what's working in the market RIGHT NOW)
+  3. Current Nairobi/Kenya cultural moments and events
 
-You will be given up to 52 weeks of historical weekly performance data alongside recent snapshots. Use both to:
-- Identify seasonal patterns (e.g. school term starts, Kenyan public holidays, end-of-month spend cycles)
+── PERFORMANCE DATA ──
+You will receive up to 52 weeks of historical weekly data. Use it to:
+- Identify seasonal patterns (school term starts, Kenyan public holidays, end-of-month spend cycles)
 - Spot year-over-year or quarter-over-quarter trends
-- Flag weeks where performance historically spikes or dips, so opportunities can pre-empt or capitalise on them
+- Flag historically high/low performance weeks to pre-empt or capitalise on
 
+── COMPETITIVE INTELLIGENCE ──
+You will receive research on local competitors (Java House, K-Krew, Dormans, Brew Bistro) and global
+reference brands (Starbucks, Blue Tokai, Tim Hortons, % Arabica). Use it to:
+- Identify formats and content angles that are gaining traction (Reels > static, storytelling > product shots)
+- Spot gaps — topics/formats competitors are NOT doing that Artcaffe could own
+- Identify trends all players are following that Artcaffe should participate in NOW
+- Flag specific content types driving the most engagement (behind-the-scenes, origin stories, ASMR brewing, etc.)
+- Learn from their most successful post structures without copying them
+
+── OUTPUT FORMAT ──
 Output ONLY a JSON object with this exact shape — no markdown fences, no prose:
 {
-  "summary": "2-3 sentence overview of current performance trends and the key theme across opportunities",
+  "summary": "2-3 sentence overview of current performance + key competitive landscape insight",
+  "competitive_landscape": "1-2 sentences on what competitors and global brands are doing right now that Artcaffe must respond to or differentiate from",
   "opportunities": [
     {
-      "signal": "specific data point or trend observation (include dates/weeks if referencing historical data)",
+      "signal": "specific data point or trend observation driving this opportunity",
+      "competitive_context": "what competitors/global brands are doing in this space — or the gap they are NOT filling",
       "opportunity": "clear description of the content opportunity",
       "content_angle": "the specific angle or message the content should take",
       "hook": "a compelling opening line or hook for the content",
       "platform": "instagram_organic | meta_ads | linkedin_organic | google_ads",
       "format": "Post | Carousel | Reel | Story | Ad | Article",
       "priority": "high | medium | low",
-      "rationale": "why this opportunity fits the brand and will resonate with the audience"
+      "rationale": "why this opportunity fits Artcaffe's brand and will resonate with the Nairobi audience"
     }
   ]
 }
 
 Rules:
-- Base every opportunity on specific data signals — never invent metrics.
-- Cross-reference web research results with platform data — an opportunity backed by BOTH a data trend AND a current Nairobi/Kenya news signal is stronger than either alone.
-- Avoid repeating angles already covered in recent briefs OR in previous research runs.
-- If previous research runs are shown, every opportunity you identify MUST be on a different topic, platform, or angle — no repeats at all.
-- Use historical weekly data to identify seasonality and trends, not just the most recent week.
-- Each opportunity must align with the brand voice and at least one messaging pillar.
+- Every opportunity must be grounded in at least one data signal OR one competitive/trend signal — never invent.
+- Opportunities backed by BOTH own data AND competitive intelligence are the highest priority.
+- Identify format gaps: if competitors dominate static posts but ignore Reels, that is an opportunity.
+- Avoid repeating angles already covered in recent briefs OR previous research runs.
 - Factor in Kenyan culture, Nairobi food scene, and seasonal moments where relevant.
-- Return 3-5 opportunities. Quality over quantity.
+- Return 4-6 opportunities. Quality over quantity.
 - Return ONLY the JSON object.\
 """
 
@@ -99,21 +113,59 @@ def _ddg_search(query: str, max_results: int = 5) -> list[dict]:
 
 def _fetch_web_research(today: date) -> str:
     """
-    Run 4 targeted searches in parallel and return a formatted prompt section.
-    Each search targets a different research angle relevant to Artcaffe.
+    Run 10 targeted searches in parallel covering competitors, global reference brands,
+    format/engagement trends, and current Nairobi moments.
+    Organised into four labelled sections in the prompt.
     Returns empty string if all searches fail (graceful degradation).
     """
     month_year = today.strftime("%B %Y")
+    year = today.strftime("%Y")
+
     queries = {
-        "Nairobi food & café trends": f"Nairobi café restaurant food trends {month_year}",
-        "Kenya marketing & social media": f"Kenya social media marketing campaigns food brands {month_year}",
-        "Nairobi upcoming events": f"Nairobi events activities things to do {month_year}",
-        "Competitors & local food scene": "Artcaffe Kenya competitor cafe promotions deals 2026",
+        # ── Local competitors ──────────────────────────────────────────────
+        "Local competitor: Java House": f"Java House Kenya Instagram Facebook content strategy posts {year}",
+        "Local competitor: K-Krew & others": f"K-Krew Dormans Brew Bistro Kenya café social media marketing {year}",
+
+        # ── Global reference brands ────────────────────────────────────────
+        "Global brand: Starbucks social strategy": f"Starbucks Instagram Reels content strategy most viral posts {year}",
+        "Global brand: Blue Tokai & specialty coffee": f"Blue Tokai coffee specialty café Instagram storytelling content {year}",
+        "Global brand: % Arabica / Tim Hortons": f"Arabica coffee Tim Hortons café social media content format trends {year}",
+
+        # ── Format & engagement trends ─────────────────────────────────────
+        "Instagram format trends": f"Instagram Reels carousel engagement food café brands best performing formats {month_year}",
+        "Content type trends (food & storytelling)": f"food brand storytelling behind-the-scenes origin story content Instagram engagement {year}",
+        "TikTok & short-form café content": f"café coffee TikTok viral content ASMR brewing barista trends {month_year}",
+
+        # ── What's happening NOW ───────────────────────────────────────────
+        "Nairobi food scene now": f"Nairobi restaurant café food scene new openings trends {month_year}",
+        "Kenya events & cultural moments": f"Nairobi Kenya events cultural moments calendar {month_year}",
+    }
+
+    # Group labels into sections for clean prompt formatting
+    SECTIONS = {
+        "LOCAL COMPETITORS — what Artcaffe's direct rivals are posting and doing": [
+            "Local competitor: Java House",
+            "Local competitor: K-Krew & others",
+        ],
+        "GLOBAL REFERENCE BRANDS — formats and angles from world-class café brands": [
+            "Global brand: Starbucks social strategy",
+            "Global brand: Blue Tokai & specialty coffee",
+            "Global brand: % Arabica / Tim Hortons",
+        ],
+        "FORMAT & ENGAGEMENT TRENDS — what content types are gaining traction RIGHT NOW": [
+            "Instagram format trends",
+            "Content type trends (food & storytelling)",
+            "TikTok & short-form café content",
+        ],
+        "NAIROBI NOW — local moments, events, and cultural signals to tap into": [
+            "Nairobi food scene now",
+            "Kenya events & cultural moments",
+        ],
     }
 
     results_by_label: dict[str, list[dict]] = {}
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = {pool.submit(_ddg_search, q): label for label, q in queries.items()}
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_ddg_search, q, 6): label for label, q in queries.items()}
         for future in as_completed(futures):
             label = futures[future]
             try:
@@ -121,18 +173,27 @@ def _fetch_web_research(today: date) -> str:
             except Exception:
                 results_by_label[label] = []
 
-    lines = []
-    for label, results in results_by_label.items():
-        if not results:
-            continue
-        lines.append(f"\n[{label}]")
-        for r in results:
-            if r.get("title") or r.get("snippet"):
-                lines.append(f"  • {r['title']}: {r['snippet']}")
+    lines = ["\nCOMPETITIVE & MARKET INTELLIGENCE (use to ground opportunities in what's working NOW):"]
+    any_results = False
 
-    if not lines:
+    for section_title, labels in SECTIONS.items():
+        section_lines = []
+        for label in labels:
+            hits = results_by_label.get(label, [])
+            if not hits:
+                continue
+            section_lines.append(f"\n  [{label}]")
+            for r in hits:
+                if r.get("title") or r.get("snippet"):
+                    section_lines.append(f"    • {r['title']}: {r['snippet']}")
+        if section_lines:
+            lines.append(f"\n── {section_title} ──")
+            lines.extend(section_lines)
+            any_results = True
+
+    if not any_results:
         return ""
-    return "\nWEB RESEARCH — current Nairobi/Kenya trends (use to identify timely opportunities):" + "\n".join(lines)
+    return "\n".join(lines)
 
 
 def _fetch_snapshots(sb: Client, concept_id: str, days: int = 365) -> list[dict]:
@@ -325,7 +386,7 @@ def run_research(
         _build_previous_research_section(previous_research),
         web_research,
         "",
-        f"Today is {today.isoformat()}. Identify 3-5 HIGH-IMPACT content opportunities that are COMPLETELY DIFFERENT from any previously identified above. Where relevant, tie opportunities to the current trends and events found in the web research.",
+        f"Today is {today.isoformat()}. Identify 4-6 HIGH-IMPACT content opportunities that are COMPLETELY DIFFERENT from any previously identified above.\n\nUse the competitive intelligence to:\n  1. Identify formats competitors dominate — and where Artcaffe can go further\n  2. Spot content angles NO local competitor is doing (Artcaffe-owned territory)\n  3. Identify global trends from reference brands that should be adapted for Nairobi NOW\n  4. Flag what is driving the highest engagement in the category right now (Reels, ASMR, storytelling, etc.)\n\nEvery opportunity must state its competitive context — what are rivals doing, and how does Artcaffe differentiate or lead?",
     ]
     user_message = "\n".join(p for p in user_parts if p)
 
