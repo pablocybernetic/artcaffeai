@@ -56,6 +56,7 @@ from agent_routes import router as agent_router
 from publishing_routes import router as publish_router
 from font_routes import router as font_router
 from budget_routes import router as budget_router
+from ads_routes import router as ads_router
 
 # ---------------------------------------------------------------------------
 # Config
@@ -82,6 +83,7 @@ app.include_router(agent_router)
 app.include_router(publish_router)
 app.include_router(font_router)
 app.include_router(budget_router)
+app.include_router(ads_router)
 
 
 # ---------------------------------------------------------------------------
