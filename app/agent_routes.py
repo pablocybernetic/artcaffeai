@@ -103,6 +103,7 @@ class VideoRequest(BaseModel):
     caption: str = ""
     platform: str = "instagram"
     image_url: str = ""                # source image URL; auto-resolved from content_item if blank
+    runway_api_key: str = ""           # from frontend Settings — overrides RUNWAYML_API_SECRET env var
     runway_model: str = ""             # override RUNWAY_MODEL env (e.g. "gen3a_turbo")
 
 
@@ -568,6 +569,7 @@ def generate_video(req: VideoRequest):
             caption=req.caption,
             platform=req.platform,
             image_url=req.image_url,
+            runway_api_key=req.runway_api_key,
             model_override=req.runway_model,
         )
         return {"ok": True, "asset": asset, "mode": "video"}

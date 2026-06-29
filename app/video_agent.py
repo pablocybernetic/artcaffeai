@@ -118,9 +118,9 @@ def _make_motion_prompt(
 # ---------------------------------------------------------------------------
 # Runway API — image-to-video
 # ---------------------------------------------------------------------------
-def _runway_headers() -> dict:
+def _runway_headers(api_key: str) -> dict:
     return {
-        "Authorization": f"Bearer {RUNWAY_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "X-Runway-Version": "2024-11-06",
     }
@@ -133,6 +133,7 @@ def _submit_video_task(
     ratio: str,
     duration: int,
     model: str,
+    api_key: str,
 ) -> str:
     """Submit an image-to-video task to Runway. Returns task_id."""
     payload = {
@@ -144,7 +145,7 @@ def _submit_video_task(
     }
     r = httpx.post(
         f"{RUNWAY_BASE}/v1/image_to_video",
-        headers=_runway_headers(),
+        headers=_runway_headers(api_key),
         json=payload,
         timeout=30.0,
     )
@@ -157,13 +158,13 @@ def _submit_video_task(
     return task_id
 
 
-def _poll_task(task_id: str) -> str:
+def _poll_task(task_id: str, api_key: str) -> str:
     """Poll Runway task until SUCCEEDED. Returns video URL."""
     deadline = time.time() + MAX_POLL_SECONDS
     while time.time() < deadline:
         r = httpx.get(
             f"{RUNWAY_BASE}/v1/tasks/{task_id}",
-            headers=_runway_headers(),
+            headers=_runway_headers(api_key),
             timeout=15.0,
         )
         if not r.is_success:
@@ -254,14 +255,17 @@ def run_video_generation(
     platform: str = "instagram",
     image_url: str = "",
     model_override: str = "",
+    runway_api_key: str = "",
 ) -> dict:
     """
     Generate a short marketing video and save it as an asset.
     Returns the saved asset row.
     """
-    if not RUNWAY_API_KEY:
+    # Prefer key passed from frontend Settings; fall back to env var
+    resolved_key = runway_api_key.strip() or RUNWAY_API_KEY
+    if not resolved_key:
         raise RuntimeError(
-            "RUNWAYML_API_SECRET not configured. Add it to your .env file."
+            "Runway API key not configured. Add it in Settings → AI video generation."
         )
 
     # 1. Brand context
@@ -305,10 +309,11 @@ def run_video_generation(
         ratio=ratio,
         duration=duration,
         model=model,
+        api_key=resolved_key,
     )
     print(f"[video_agent] submitted task_id={task_id}", flush=True)
 
-    video_url = _poll_task(task_id)
+    video_url = _poll_task(task_id, resolved_key)
     print(f"[video_agent] video ready: {video_url[:80]}…", flush=True)
 
     # 5. Download video
