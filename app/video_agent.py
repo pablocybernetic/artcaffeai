@@ -63,14 +63,28 @@ _RATIO_MAP = {
 # ---------------------------------------------------------------------------
 MOTION_SYSTEM = """\
 You are a cinematic art director for Artcaffe, a premium café brand in Nairobi, Kenya.
-Your task: write a subtle, premium motion prompt for Runway video generation.
+Your task: write a precise, premium motion prompt for Runway Gen-4 image-to-video generation.
 
-The video will be generated FROM an existing marketing photo — so describe the MOVEMENT
-and ATMOSPHERE, not the scene (the scene is already in the image).
+The video is generated FROM a still marketing photo — the scene already exists in the image.
+You are describing MOTION only: camera moves, atmospheric elements, and physical movement
+that would make this specific image come alive.
+
+Use every piece of image metadata provided to make the motion feel native to the scene:
+- Match camera movement to the scene type (pull-back for interiors, slow pan for food close-ups)
+- Match atmospheric motion to what's physically possible (steam from hot drinks, soft fabric movement, ambient crowd)
+- Match mood and lighting to the photography style (editorial → cinematic float, candid → handheld drift)
+- Reference specific food/drink items when describing motion (e.g. "steam rising from the flat white")
+- Use the color palette and mood to set the energy (warm tones → slow, golden, languid movement)
+
+Rules:
+- NO fast cuts, shaky cam, or dramatic zooms — Artcaffe is upscale and calm
+- Motion should feel like a luxury brand TVC, not a TikTok ad
+- The motion prompt should reference what is actually IN the image, not generic café descriptions
+- Keep it 1-2 sentences: one for camera, one for atmospheric/subject motion
 
 Output ONLY a JSON object — no markdown, no prose:
 {
-  "motion_prompt": "1-2 sentences describing camera movement and atmospheric motion (steam, soft light, gentle crowd movement). Keep it cinematic, warm, premium. Avoid fast cuts or dramatic zooms — this is an upscale brand.",
+  "motion_prompt": "precise motion description referencing actual image content",
   "duration": 5,
   "ratio": "1280:720"
 }
@@ -84,6 +98,38 @@ Duration: 5 seconds for stories/reels/ads; 10 seconds for LinkedIn/YouTube.\
 """
 
 
+def _build_image_metadata_section(image_metadata: dict) -> str:
+    """Format asset analysis metadata into a structured prompt section."""
+    if not image_metadata:
+        return ""
+
+    parts: list[str] = ["IMAGE METADATA (use this to make the motion specific to THIS photo):"]
+
+    if desc := image_metadata.get("description"):
+        parts.append(f"  Description: {desc}")
+    if scene := image_metadata.get("scene_type"):
+        parts.append(f"  Scene type: {scene}")
+    if mood := image_metadata.get("mood"):
+        parts.append(f"  Mood: {mood}")
+    if style := image_metadata.get("photography_style"):
+        parts.append(f"  Photography style: {style}")
+    if food := image_metadata.get("food_items"):
+        parts.append(f"  Food/drink items visible: {', '.join(food)}")
+    if image_metadata.get("people_present") is not None:
+        parts.append(f"  People present: {'yes' if image_metadata['people_present'] else 'no'}")
+    if palette := image_metadata.get("color_palette"):
+        if isinstance(palette, list):
+            parts.append(f"  Color palette: {', '.join(palette)}")
+        elif isinstance(palette, str):
+            parts.append(f"  Color palette: {palette}")
+    if lighting := image_metadata.get("lighting"):
+        parts.append(f"  Lighting: {lighting}")
+    if tags := image_metadata.get("tags"):
+        parts.append(f"  Keywords: {', '.join(tags[:10])}")
+
+    return "\n".join(parts)
+
+
 def _make_motion_prompt(
     anthropic: Any,
     *,
@@ -91,23 +137,31 @@ def _make_motion_prompt(
     caption: str,
     platform: str,
     brand_context: dict,
+    image_metadata: Optional[dict] = None,
 ) -> dict:
-    user_msg = (
-        "BRAND CONTEXT:\n" + json.dumps(brand_context, indent=2) + "\n\n"
-        f"HEADLINE: {headline}\n"
-        f"CAPTION: {caption}\n"
-        f"PLATFORM: {platform}\n\n"
-        "Write the Runway motion prompt for this marketing video."
-    )
+    parts: list[str] = [
+        "BRAND CONTEXT:\n" + json.dumps(brand_context, indent=2),
+        "",
+        f"HEADLINE: {headline}",
+        f"CAPTION: {caption}",
+        f"PLATFORM: {platform}",
+    ]
+
+    meta_section = _build_image_metadata_section(image_metadata or {})
+    if meta_section:
+        parts += ["", meta_section]
+
+    parts += ["", "Write the Runway motion prompt for this marketing video."]
+    user_msg = "\n".join(parts)
+
     resp = anthropic.messages.create(
         model=MODEL,
-        max_tokens=300,
+        max_tokens=400,
         system=MOTION_SYSTEM,
         messages=[{"role": "user", "content": user_msg}],
         timeout=20.0,
     )
     raw = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
-    raw = raw.strip()
     if raw.startswith("```"):
         raw = raw[raw.index("\n") + 1:] if "\n" in raw else raw[3:]
     if raw.endswith("```"):
@@ -212,8 +266,8 @@ def _now() -> str:
 # ---------------------------------------------------------------------------
 # Resolve source image from content item
 # ---------------------------------------------------------------------------
-def _resolve_image_url(sb: Client, content_item_id: str) -> Optional[str]:
-    """Find the best image asset already attached to this content item."""
+def _resolve_image_asset(sb: Client, content_item_id: str) -> Optional[dict]:
+    """Find the best image asset attached to this content item. Returns full asset row."""
     item_res = (
         sb.table("content_items")
         .select("asset_ids")
@@ -229,16 +283,14 @@ def _resolve_image_url(sb: Client, content_item_id: str) -> Optional[str]:
 
     asset_res = (
         sb.table("assets")
-        .select("public_url,asset_type")
+        .select("id,public_url,asset_type,metadata,analysis_status")
         .in_("id", asset_ids)
         .eq("asset_type", "image")
         .order("created_at", desc=True)
         .limit(1)
         .execute()
     )
-    if asset_res.data:
-        return asset_res.data[0].get("public_url")
-    return None
+    return asset_res.data[0] if asset_res.data else None
 
 
 # ---------------------------------------------------------------------------
@@ -274,10 +326,20 @@ def run_video_generation(
         raise RuntimeError(f"No active brand context for concept_id={concept_id}")
     brand_context = ctx.get("context_json") or ctx
 
-    # 2. Resolve source image
+    # 2. Resolve source image + metadata
     source_url = image_url.strip()
+    image_metadata: Optional[dict] = None
+
     if not source_url and content_item_id:
-        source_url = _resolve_image_url(sb, content_item_id) or ""
+        source_asset = _resolve_image_asset(sb, content_item_id)
+        if source_asset:
+            source_url = source_asset.get("public_url", "")
+            # Use rich analysis metadata if the asset has been analysed
+            if source_asset.get("analysis_status") == "done":
+                image_metadata = source_asset.get("metadata") or {}
+                if image_metadata:
+                    print(f"[video_agent] using image metadata: {list(image_metadata.keys())}", flush=True)
+
     if not source_url:
         raise RuntimeError(
             "No source image provided and no image asset found on this content item. "
@@ -286,13 +348,14 @@ def run_video_generation(
 
     print(f"[video_agent] source image: {source_url[:80]}…", flush=True)
 
-    # 3. Generate motion prompt via Claude
+    # 3. Generate motion prompt via Claude — enriched with image metadata
     prompt_data = _make_motion_prompt(
         anthropic,
         headline=headline,
         caption=caption,
         platform=platform,
         brand_context=brand_context,
+        image_metadata=image_metadata,
     )
     motion_prompt = prompt_data.get("motion_prompt", "Slow cinematic push, warm ambient café light, gentle steam rising from coffee.")
     duration = int(prompt_data.get("duration", 5))
@@ -343,6 +406,7 @@ def run_video_generation(
             "source_image_url": source_url,
             "ratio": ratio,
             "duration_seconds": duration,
+            "source_image_metadata": image_metadata or {},
         },
         "created_at": _now(),
     }
