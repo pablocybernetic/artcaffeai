@@ -75,6 +75,13 @@ class AllocationUpdate(BaseModel):
     period_end: Optional[str] = None
 
 
+class ApplyRecommendationRequest(BaseModel):
+    concept_id: str
+    platform: str
+    action: str                  # increase | decrease | pause | maintain
+    suggested_change_usd: float
+
+
 # ---------------------------------------------------------------------------
 # Analysis
 # ---------------------------------------------------------------------------
@@ -279,3 +286,65 @@ def delete_allocation(allocation_id: str):
     if not res.data:
         raise HTTPException(status_code=404, detail="Allocation not found")
     return {"ok": True, "deleted": allocation_id}
+
+
+@router.post("/apply-recommendation")
+def apply_recommendation(req: ApplyRecommendationRequest):
+    """
+    Apply a reallocation recommendation to the matching budget allocation.
+
+    Actions:
+      increase  → allocated_usd += abs(suggested_change_usd)
+      decrease  → allocated_usd = max(spent_usd, allocated_usd - abs(suggested_change_usd))
+      pause     → allocated_usd = spent_usd  (cap budget at what has already been spent)
+      maintain  → no-op, returns current allocation unchanged
+    """
+    # Find the allocation for this concept + platform (most recent active period)
+    res = (
+        sb.table("budget_allocations")
+        .select("*")
+        .eq("concept_id", req.concept_id)
+        .eq("platform", req.platform)
+        .order("period_start", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No allocation found for concept={req.concept_id} platform={req.platform}",
+        )
+
+    alloc = res.data[0]
+    current   = float(alloc["allocated_usd"])
+    spent     = float(alloc["spent_usd"])
+    delta     = abs(req.suggested_change_usd)
+
+    if req.action == "maintain":
+        return {"ok": True, "allocation": alloc, "change": 0}
+
+    if req.action == "increase":
+        new_allocated = current + delta
+    elif req.action == "decrease":
+        new_allocated = max(spent, current - delta)
+    elif req.action == "pause":
+        new_allocated = spent  # cap at actual spend so no more can be burned
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown action: {req.action}")
+
+    new_allocated = round(new_allocated, 2)
+    update_res = (
+        sb.table("budget_allocations")
+        .update({"allocated_usd": new_allocated, "updated_at": _now()})
+        .eq("id", alloc["id"])
+        .execute()
+    )
+    updated = update_res.data[0] if update_res.data else {**alloc, "allocated_usd": new_allocated}
+    change  = round(new_allocated - current, 2)
+
+    print(
+        f"[budget_routes] applied {req.action} to {req.platform}: "
+        f"${current:,.0f} → ${new_allocated:,.0f} (change={change:+,.0f})",
+        flush=True,
+    )
+    return {"ok": True, "allocation": updated, "change": change}
