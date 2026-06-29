@@ -27,6 +27,7 @@ import os
 from job_runner import run_job
 from image_agent import run_image_generation, select_best_asset, apply_overlay_to_asset
 from image_analysis_agent import analyze_asset as _analyze_asset
+from video_agent import run_video_generation
 
 # ---------------------------------------------------------------------------
 # Config
@@ -93,6 +94,16 @@ class BannerRequest(BaseModel):
 
 class AnalyzeAssetRequest(BaseModel):
     asset_id: str
+
+
+class VideoRequest(BaseModel):
+    concept_id: str
+    content_item_id: str = ""          # attach video to this item (optional)
+    headline: str
+    caption: str = ""
+    platform: str = "instagram"
+    image_url: str = ""                # source image URL; auto-resolved from content_item if blank
+    runway_model: str = ""             # override RUNWAY_MODEL env (e.g. "gen3a_turbo")
 
 
 class PublishNowRequest(BaseModel):
@@ -525,3 +536,42 @@ def generate_banner(req: BannerRequest):
         raise HTTPException(status_code=400, detail=err_str)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Image generation failed: {e}")
+
+
+@router.post("/generate-video")
+def generate_video(req: VideoRequest):
+    """
+    Generate a short marketing video from an image using Runway Gen-4 Turbo.
+
+    Flow:
+      1. Resolve source image — uses req.image_url if provided, else auto-picks
+         the most recent image asset attached to req.content_item_id.
+      2. Claude Haiku writes a cinematic motion prompt.
+      3. Runway image-to-video task is submitted + polled until complete.
+      4. Video is downloaded, uploaded to Supabase Storage, and saved as an
+         asset row (asset_type="video", generator="runway").
+      5. Asset is attached to the content item's asset_ids array.
+
+    Requires RUNWAYML_API_SECRET env var. Runs synchronously (~30-120s).
+    Returns the saved asset row with public_url for immediate playback.
+    """
+    from anthropic import Anthropic  # noqa: PLC0415
+
+    anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    try:
+        asset = run_video_generation(
+            sb=sb,
+            anthropic=anthropic_client,
+            concept_id=req.concept_id,
+            content_item_id=req.content_item_id or None,
+            headline=req.headline,
+            caption=req.caption,
+            platform=req.platform,
+            image_url=req.image_url,
+            model_override=req.runway_model,
+        )
+        return {"ok": True, "asset": asset, "mode": "video"}
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Video generation failed: {e}")
