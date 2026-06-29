@@ -5,8 +5,8 @@ Analyses paid media budget pacing per concept and produces reallocation
 recommendations using Claude Haiku.
 
 Workflow:
-  1. Read current period budget_allocations for the concept(s)
-  2. Pull latest platform_data_snapshots for performance context
+  1. Sync spent_usd from latest BigQuery paid_ads snapshot (channel → platform mapping)
+  2. Read current period budget_allocations for the concept(s)
   3. Compute pacing metrics (expected spend % vs actual spend %)
   4. Claude Haiku → structured recommendations JSON
   5. Write per-allocation alerts to budget_alerts
@@ -28,6 +28,33 @@ from typing import Any, Optional
 from supabase import Client
 
 MODEL = "claude-haiku-4-5-20251001"
+
+# Map BigQuery channel names (case-insensitive) → budget_allocations.platform values
+_CHANNEL_TO_PLATFORM: dict[str, str] = {
+    "google":           "google_ads",
+    "google ads":       "google_ads",
+    "google_ads":       "google_ads",
+    "google/cpc":       "google_ads",
+    "google display":   "google_ads",
+    "facebook":         "meta_ads",
+    "facebook ads":     "meta_ads",
+    "meta":             "meta_ads",
+    "meta ads":         "meta_ads",
+    "meta_ads":         "meta_ads",
+    "instagram":        "instagram_organic",
+    "instagram ads":    "meta_ads",
+    "linkedin":         "linkedin_organic",
+    "linkedin ads":     "linkedin_organic",
+    "tiktok":           "tiktok",
+}
+
+_PLATFORM_LABEL: dict[str, str] = {
+    "meta_ads":           "Meta Ads",
+    "instagram_organic":  "Instagram",
+    "google_ads":         "Google Ads",
+    "linkedin_organic":   "LinkedIn",
+    "tiktok":             "TikTok",
+}
 
 SYSTEM_PROMPT = """\
 You are the Artcaffe Budget Agent. You analyse paid media budget pacing and produce
@@ -66,14 +93,6 @@ Output ONLY a JSON object — no markdown, no extra prose:
 }
 """
 
-_PLATFORM_LABEL: dict[str, str] = {
-    "meta_ads":           "Meta Ads",
-    "instagram_organic":  "Instagram",
-    "google_ads":         "Google Ads",
-    "linkedin_organic":   "LinkedIn",
-    "tiktok":             "TikTok",
-}
-
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -111,6 +130,49 @@ def _load_performance(sb: Client, concept_id: str) -> Optional[dict]:
         .execute()
     )
     return res.data[0]["summary_json"] if res.data else None
+
+
+def sync_spent_from_snapshot(sb: Client, concept_id: str, allocations: list[dict]) -> None:
+    """
+    Sync spent_usd in budget_allocations from the latest BigQuery paid_ads snapshot.
+    Maps BigQuery channel names (e.g. 'Google', 'Facebook') to platform values.
+    Mutates allocations in-place so subsequent pacing calc uses fresh values.
+    """
+    perf = _load_performance(sb, concept_id)
+    if not perf:
+        return
+
+    by_channel = perf.get("paid_ads", {}).get("by_channel", [])
+    if not by_channel:
+        return
+
+    # Aggregate spend per platform from BigQuery channels
+    platform_spend: dict[str, float] = {}
+    for ch in by_channel:
+        raw = (ch.get("channel") or "").lower().strip()
+        platform = _CHANNEL_TO_PLATFORM.get(raw)
+        if platform:
+            platform_spend[platform] = (
+                platform_spend.get(platform, 0) + float(ch.get("total_spend") or 0)
+            )
+
+    if not platform_spend:
+        return
+
+    for a in allocations:
+        platform = a.get("platform", "")
+        if platform not in platform_spend:
+            continue
+        new_spent = round(platform_spend[platform], 2)
+        try:
+            sb.table("budget_allocations").update({
+                "spent_usd": new_spent,
+                "updated_at": _now(),
+            }).eq("id", a["id"]).execute()
+            a["spent_usd"] = new_spent  # keep in-memory in sync
+            print(f"[budget_agent] synced {platform} spent_usd={new_spent}", flush=True)
+        except Exception as e:
+            print(f"[budget_agent] could not sync spent for {a.get('id')}: {e}", flush=True)
 
 
 def _build_user_prompt(
@@ -174,11 +236,6 @@ def _write_alerts(sb: Client, allocations: list[dict], concept_result: dict) -> 
     Write per-allocation alert rows for any platforms that are off-pace.
     Resolves previous unresolved alerts for the same allocation first.
     """
-    recs_by_platform: dict[str, dict] = {
-        r["platform"]: r
-        for r in concept_result.get("recommendations", [])
-    }
-
     for a in allocations:
         alloc   = float(a.get("allocated_usd") or 0)
         spent   = float(a.get("spent_usd") or 0)
@@ -208,9 +265,8 @@ def _write_alerts(sb: Client, allocations: list[dict], concept_result: dict) -> 
                 f"({ratio*100:.0f}% of pace) — overspending."
             )
         else:
-            continue  # on-track, no alert needed
+            continue
 
-        # Resolve previous unresolved alerts for this allocation
         try:
             sb.table("budget_alerts").update({"is_resolved": True}).eq(
                 "allocation_id", a["id"]
@@ -218,7 +274,6 @@ def _write_alerts(sb: Client, allocations: list[dict], concept_result: dict) -> 
         except Exception:
             pass
 
-        # Create new alert
         try:
             sb.table("budget_alerts").insert({
                 "id":            str(uuid.uuid4()),
@@ -239,7 +294,6 @@ def _save_recommendation(
     result: dict,
     allocations: list[dict],
 ) -> dict:
-    """Persist the full analysis to budget_recommendations. Silent on failure."""
     row = {
         "concept_id":      concept_id,
         "period_start":    allocations[0].get("period_start") if allocations else None,
@@ -272,6 +326,9 @@ def analyze_concept(*, sb: Client, anthropic: Any, concept_id: str) -> dict:
             "ok": False,
             "error": f"No budget allocations found for concept {concept_id}",
         }
+
+    # Sync spent_usd from BigQuery before analysing
+    sync_spent_from_snapshot(sb, concept_id, allocations)
 
     perf = _load_performance(sb, concept_id)
 
