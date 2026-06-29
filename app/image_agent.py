@@ -34,9 +34,7 @@ from image_overlay import overlay_headline
 # Config
 # ---------------------------------------------------------------------------
 MODEL = "claude-haiku-4-5-20251001"
-IMAGE_PROVIDER = os.environ.get("IMAGE_PROVIDER", "openai")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-IDEOGRAM_API_KEY = os.environ.get("IDEOGRAM_API_KEY")
+IDEOGRAM_API_KEY = os.environ.get("IDEOGRAM_API_KEY", "")
 ASSETS_BUCKET = os.environ.get("ASSETS_BUCKET", "generated-assets")
 FALLBACK_BUCKET = os.environ.get("BRAND_BUCKET", "brand-guidelines")
 
@@ -106,29 +104,8 @@ def _make_image_prompt(
 
 
 # ---------------------------------------------------------------------------
-# Image generation providers
+# Image generation — Ideogram V2
 # ---------------------------------------------------------------------------
-_VALID_DALLE_SIZES = {"1024x1024", "1792x1024", "1024x1792"}
-
-
-def _generate_dalle(prompt: str, size: str, api_key: str) -> bytes:
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY not configured")
-    if size not in _VALID_DALLE_SIZES:
-        size = "1024x1024"
-    r = httpx.post(
-        "https://api.openai.com/v1/images/generations",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={"model": "dall-e-3", "prompt": prompt, "n": 1, "size": size, "response_format": "url"},
-        timeout=90.0,
-    )
-    r.raise_for_status()
-    image_url = r.json()["data"][0]["url"]
-    img = httpx.get(image_url, timeout=60.0)
-    img.raise_for_status()
-    return img.content
-
-
 def _generate_ideogram(prompt: str, negative_prompt: str, size: str, api_key: str) -> bytes:
     if not api_key:
         raise RuntimeError("IDEOGRAM_API_KEY not configured")
@@ -153,45 +130,19 @@ def _generate_ideogram(prompt: str, negative_prompt: str, size: str, api_key: st
     return img.content
 
 
-def _pick_provider(
-    key_override: str = "",
-    provider_override: str = "",
-) -> tuple[str, str]:
-    """Returns (provider_name, api_key). Prefers request-level overrides over env vars."""
-    # Resolve provider preference
-    preferred = provider_override.strip() or IMAGE_PROVIDER
-
-    if preferred == "ideogram":
-        key = key_override.strip() or IDEOGRAM_API_KEY or ""
-        if key:
-            return "ideogram", key
-        # fall through to try openai
-    # Try openai
-    key = (key_override.strip() if preferred == "openai" else "") or OPENAI_API_KEY or ""
-    if key:
-        return "openai", key
-    # Last resort: any ideogram key
-    key = IDEOGRAM_API_KEY or ""
-    if key:
-        return "ideogram", key
-    raise RuntimeError(
-        "No image provider configured. Set OPENAI_API_KEY (DALL-E 3) "
-        "or IDEOGRAM_API_KEY + IMAGE_PROVIDER=ideogram."
-    )
-
-
 def _generate_image(
     prompt: str,
     negative_prompt: str,
     size: str,
     key_override: str = "",
-    provider_override: str = "",
 ) -> tuple[bytes, str]:
-    """Generate image bytes. Returns (bytes, provider_name)."""
-    provider, api_key = _pick_provider(key_override, provider_override)
-    if provider == "ideogram":
-        return _generate_ideogram(prompt, negative_prompt, size, api_key), "ideogram"
-    return _generate_dalle(prompt, size, api_key), "dalle3"
+    """Generate image bytes using Ideogram V2. Returns (bytes, 'ideogram')."""
+    api_key = key_override.strip() or IDEOGRAM_API_KEY
+    if not api_key:
+        raise RuntimeError(
+            "No image provider configured. Add your Ideogram API key in Settings → AI image generation."
+        )
+    return _generate_ideogram(prompt, negative_prompt, size, api_key), "ideogram"
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +181,6 @@ def run_image_generation(
     caption: str,
     platform: str = "instagram",
     image_api_key: str = "",
-    image_provider_override: str = "",
 ) -> dict:
     """
     Generate a banner image and save it as an asset.
@@ -264,7 +214,6 @@ def run_image_generation(
     image_bytes, provider = _generate_image(
         image_prompt, negative_prompt, size,
         key_override=image_api_key,
-        provider_override=image_provider_override,
     )
 
     # 3b. Burn headline text onto the image using brand fonts from storage

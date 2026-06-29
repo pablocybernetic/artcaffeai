@@ -88,8 +88,7 @@ class BannerRequest(BaseModel):
     headline: str
     caption: str
     platform: str = "instagram"
-    image_provider: str = ""      # "openai" | "ideogram" — overrides env IMAGE_PROVIDER
-    image_api_key: str = ""       # key from frontend Settings — overrides env var
+    image_api_key: str = ""       # Ideogram key from frontend Settings — overrides env var
 
 
 class AnalyzeAssetRequest(BaseModel):
@@ -506,7 +505,6 @@ def generate_banner(req: BannerRequest):
             caption=req.caption,
             platform=req.platform,
             image_api_key=req.image_api_key,
-            image_provider_override=req.image_provider,
         )
         return {"ok": True, "asset": asset, "mode": "generated"}
     except RuntimeError as e:
