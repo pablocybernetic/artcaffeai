@@ -10,10 +10,13 @@ Credentials needed (stored in platform_credentials table):
 """
 from __future__ import annotations
 
+import time
 from typing import Optional
 import httpx
 
 GRAPH = "https://graph.facebook.com/v21.0"
+_CONTAINER_POLL_INTERVAL = 3   # seconds between status checks
+_CONTAINER_POLL_TIMEOUT  = 90  # seconds before giving up
 
 
 def _handle(resp: httpx.Response, context: str) -> dict:
@@ -27,16 +30,7 @@ def _handle(resp: httpx.Response, context: str) -> dict:
 
 
 def _page_token(page_id: str, access_token: str, client: httpx.Client) -> str:
-    """
-    Exchange a System User token for a Page Access Token.
-
-    The Graph API requires a Page Access Token (not a System User token) for
-    posting to pages. System User tokens have all permissions but the subject
-    must be the page itself for page write operations.
-
-    Falls back to the original token if the exchange fails (e.g. the stored
-    token is already a Page Access Token).
-    """
+    """Exchange a System User token for a Page Access Token."""
     try:
         r = client.get(
             f"{GRAPH}/{page_id}",
@@ -52,6 +46,31 @@ def _page_token(page_id: str, access_token: str, client: httpx.Client) -> str:
     return access_token
 
 
+def _wait_for_container(container_id: str, access_token: str, client: httpx.Client) -> None:
+    """
+    Poll the media container until Instagram finishes processing it.
+    Status codes: IN_PROGRESS → FINISHED (publish OK) or ERROR / EXPIRED (fail).
+    Raises RuntimeError if processing fails or times out.
+    """
+    deadline = time.time() + _CONTAINER_POLL_TIMEOUT
+    while time.time() < deadline:
+        r = client.get(
+            f"{GRAPH}/{container_id}",
+            params={"fields": "status_code,status", "access_token": access_token},
+            timeout=10.0,
+        )
+        data = _handle(r, "container status")
+        status = data.get("status_code") or data.get("status", "")
+        if status == "FINISHED":
+            return
+        if status in ("ERROR", "EXPIRED"):
+            raise RuntimeError(f"Instagram media container failed with status: {status}")
+        time.sleep(_CONTAINER_POLL_INTERVAL)
+    raise RuntimeError(
+        f"Instagram media container did not finish processing within {_CONTAINER_POLL_TIMEOUT}s"
+    )
+
+
 def post_instagram(
     *,
     ig_user_id: str,
@@ -59,7 +78,12 @@ def post_instagram(
     image_url: str,
     caption: str,
 ) -> dict:
-    """Two-step IG publish: create container → publish container."""
+    """
+    Two-step IG feed photo publish:
+      1. Create media container
+      2. Poll until FINISHED
+      3. Publish container
+    """
     with httpx.Client(timeout=45.0) as c:
         # Step 1 — create media container
         r1 = c.post(
@@ -68,15 +92,86 @@ def post_instagram(
         )
         creation_id = _handle(r1, "create container")["id"]
 
-        # Step 2 — publish
+        # Step 2 — wait for Instagram to finish processing the image
+        _wait_for_container(creation_id, access_token, c)
+
+        # Step 3 — publish
         r2 = c.post(
             f"{GRAPH}/{ig_user_id}/media_publish",
             params={"creation_id": creation_id, "access_token": access_token},
         )
         post_id = _handle(r2, "publish container")["id"]
 
-    post_url = f"https://www.instagram.com/p/{post_id}/"
-    return {"platform": "instagram", "post_id": post_id, "post_url": post_url}
+    return {
+        "platform": "instagram",
+        "post_id": post_id,
+        "post_url": f"https://www.instagram.com/p/{post_id}/",
+    }
+
+
+def post_instagram_reel(
+    *,
+    ig_user_id: str,
+    access_token: str,
+    video_url: str,
+    caption: str,
+    cover_url: Optional[str] = None,
+) -> dict:
+    """
+    Publish a Reel (short video) to Instagram.
+    video_url must be a publicly accessible MP4/MOV URL.
+    """
+    with httpx.Client(timeout=120.0) as c:
+        params: dict = {
+            "media_type": "REELS",
+            "video_url": video_url,
+            "caption": caption,
+            "access_token": access_token,
+            "share_to_feed": "true",
+        }
+        if cover_url:
+            params["cover_url"] = cover_url
+
+        r1 = c.post(f"{GRAPH}/{ig_user_id}/media", params=params)
+        creation_id = _handle(r1, "create reel container")["id"]
+
+        # Reels take longer to process
+        _wait_for_container(creation_id, access_token, c)
+
+        r2 = c.post(
+            f"{GRAPH}/{ig_user_id}/media_publish",
+            params={"creation_id": creation_id, "access_token": access_token},
+        )
+        post_id = _handle(r2, "publish reel")["id"]
+
+    return {
+        "platform": "instagram",
+        "post_id": post_id,
+        "post_url": f"https://www.instagram.com/reel/{post_id}/",
+        "media_type": "reel",
+    }
+
+
+def get_instagram_post_insights(
+    *,
+    post_id: str,
+    access_token: str,
+) -> dict:
+    """
+    Fetch reach, impressions, likes, comments, shares for a published post.
+    Returns a dict of metric → value.
+    """
+    METRICS = "reach,impressions,likes,comments,shares,saved,total_interactions"
+    with httpx.Client(timeout=15.0) as c:
+        r = c.get(
+            f"{GRAPH}/{post_id}/insights",
+            params={"metric": METRICS, "access_token": access_token},
+        )
+    if not r.is_success:
+        return {"error": r.text[:200]}
+    data = r.json().get("data", [])
+    return {item["name"]: item.get("values", [{}])[0].get("value", item.get("value", 0))
+            for item in data}
 
 
 def post_facebook(
@@ -86,9 +181,8 @@ def post_facebook(
     message: str,
     image_url: Optional[str] = None,
 ) -> dict:
-    """Post a photo or text update to a Facebook Page using a Page Access Token."""
+    """Post a photo or text update to a Facebook Page."""
     with httpx.Client(timeout=45.0) as c:
-        # Exchange System User token → Page Access Token (required for page write ops)
         page_access_token = _page_token(page_id, access_token, c)
 
         if image_url:
@@ -105,22 +199,19 @@ def post_facebook(
             )
             post_id = _handle(r, "feed post")["id"]
 
-    post_url = f"https://www.facebook.com/{post_id}"
-    return {"platform": "facebook", "post_id": post_id, "post_url": post_url}
+    return {
+        "platform": "facebook",
+        "post_id": post_id,
+        "post_url": f"https://www.facebook.com/{post_id}",
+    }
 
 
 def test_credentials(*, access_token: str, page_id: str) -> dict:
-    """
-    Verify token is valid and the Page Access Token exchange works.
-    Uses /me to confirm the token, then exchanges for a Page Access Token
-    and fetches the page name to confirm posting rights.
-    """
+    """Verify token and page access."""
     with httpx.Client(timeout=15.0) as c:
-        # Confirm the token is alive
         r_me = c.get(f"{GRAPH}/me", params={"fields": "id,name", "access_token": access_token})
         _handle(r_me, "credential test")
 
-        # Exchange for Page Access Token and fetch the page name
         account_name: str = page_id
         try:
             page_token = _page_token(page_id, access_token, c)
@@ -131,7 +222,6 @@ def test_credentials(*, access_token: str, page_id: str) -> dict:
             if r_page.is_success:
                 account_name = r_page.json().get("name", page_id)
         except Exception:
-            # Fall back to /me/accounts list
             try:
                 r_pages = c.get(
                     f"{GRAPH}/me/accounts",

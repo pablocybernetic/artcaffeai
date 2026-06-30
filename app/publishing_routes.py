@@ -33,6 +33,8 @@ from supabase import Client, create_client
 
 from publishers.meta_publisher import (
     post_instagram,
+    post_instagram_reel,
+    get_instagram_post_insights,
     post_facebook,
     test_credentials as test_meta,
 )
@@ -41,6 +43,8 @@ from publishers.linkedin_publisher import (
     test_credentials as test_linkedin,
 )
 from publishers.google_ads_publisher import (
+    upload_image_asset,
+    create_responsive_display_ad,
     create_responsive_search_ad,
     test_credentials as test_google_ads,
 )
@@ -184,18 +188,45 @@ def _execute_publish(
                 if not creds:
                     raise RuntimeError("Meta credentials not configured — add them in Settings → Social publishing")
                 if not creds.get("ig_user_id"):
-                    raise RuntimeError("Instagram User ID missing — edit Meta credentials in Settings and fill in the Instagram User ID field")
+                    raise RuntimeError("Instagram User ID missing — add it in Settings → Meta credentials")
                 if not creds.get("access_token"):
-                    raise RuntimeError("Meta access token missing — edit Meta credentials in Settings")
+                    raise RuntimeError("Meta access token missing — add it in Settings → Meta credentials")
                 if not image_url:
-                    raise RuntimeError("Instagram requires an image — no image asset found on this content item")
+                    raise RuntimeError("Instagram requires an image — generate a banner first")
+
                 text = f"{headline}\n\n{opt_caption}" + (f"\n\n{hashtag_str}" if hashtag_str else "")
-                r = post_instagram(
-                    ig_user_id=creds["ig_user_id"],
-                    access_token=creds["access_token"],
-                    image_url=image_url,
-                    caption=text,
-                )
+                ig_id = creds["ig_user_id"]
+                token = creds["access_token"]
+
+                # Use Reels publisher for video assets, photo publisher otherwise
+                video_url: Optional[str] = None
+                if item.get("asset_ids"):
+                    vid_res = (
+                        sb_client.table("assets")
+                        .select("public_url")
+                        .in_("id", item["asset_ids"])
+                        .eq("asset_type", "video")
+                        .limit(1)
+                        .execute()
+                    )
+                    if vid_res is not None and vid_res.data:
+                        video_url = vid_res.data[0].get("public_url")
+
+                if video_url:
+                    r = post_instagram_reel(
+                        ig_user_id=ig_id,
+                        access_token=token,
+                        video_url=video_url,
+                        caption=text,
+                        cover_url=image_url,
+                    )
+                else:
+                    r = post_instagram(
+                        ig_user_id=ig_id,
+                        access_token=token,
+                        image_url=image_url,
+                        caption=text,
+                    )
                 _save_publish_result(sb_client=sb_client, content_item_id=content_item_id, concept_id=concept_id, platform=platform, result=r)
                 results[platform] = {"ok": True, **r}
 
@@ -267,20 +298,47 @@ def _execute_publish(
             elif platform == "google_ads":
                 creds = _get_creds("google_ads", sb_client)
                 if not creds:
-                    raise RuntimeError("Google Ads credentials not configured")
+                    raise RuntimeError("Google Ads credentials not configured — add them in Settings → Google Ads")
                 headlines_list = [headline] if headline else ["Artcaffe — Premium Café"]
                 if meta.get("ad_headlines") and isinstance(meta["ad_headlines"], list):
                     headlines_list += [h[:30] for h in meta["ad_headlines"]]
                 descriptions_list = [opt_caption[:90]] if opt_caption else ["Visit Artcaffe for the best coffee in Nairobi."]
-                r = create_responsive_search_ad(
-                    access_token=creds["access_token"],
-                    developer_token=creds["developer_token"],
-                    customer_id=creds["customer_id"],
-                    ad_group_id=creds["ad_group_id"],
-                    headlines=headlines_list,
-                    descriptions=descriptions_list,
-                    final_url=creds.get("final_url") or "https://artcaffe.co.ke",
-                )
+                final_url = creds.get("final_url") or "https://artcaffe.co.ke"
+
+                if image_url:
+                    # Download the banner and upload as a Google Ads image asset,
+                    # then create a Responsive Display Ad (image + text)
+                    import httpx as _httpx  # noqa: PLC0415
+                    img_resp = _httpx.get(image_url, timeout=30.0, follow_redirects=True)
+                    img_resp.raise_for_status()
+                    asset_resource = upload_image_asset(
+                        access_token=creds["access_token"],
+                        developer_token=creds["developer_token"],
+                        customer_id=creds["customer_id"],
+                        image_bytes=img_resp.content,
+                        asset_name=f"Artcaffe {headline[:20]}",
+                    )
+                    r = create_responsive_display_ad(
+                        access_token=creds["access_token"],
+                        developer_token=creds["developer_token"],
+                        customer_id=creds["customer_id"],
+                        ad_group_id=creds["ad_group_id"],
+                        headlines=headlines_list,
+                        descriptions=descriptions_list,
+                        final_url=final_url,
+                        marketing_image_resource=asset_resource,
+                    )
+                else:
+                    # No image → fall back to text-only RSA
+                    r = create_responsive_search_ad(
+                        access_token=creds["access_token"],
+                        developer_token=creds["developer_token"],
+                        customer_id=creds["customer_id"],
+                        ad_group_id=creds["ad_group_id"],
+                        headlines=headlines_list,
+                        descriptions=descriptions_list,
+                        final_url=final_url,
+                    )
                 _save_publish_result(sb_client=sb_client, content_item_id=content_item_id, concept_id=concept_id, platform=platform, result=r)
                 results[platform] = {"ok": True, **r}
 
@@ -498,3 +556,21 @@ def publish_history(content_item_id: str):
         .execute()
     )
     return {"history": res.data or []}
+
+
+@router.get("/insights/instagram/{post_id}")
+def instagram_post_insights(post_id: str):
+    """
+    Fetch reach, impressions, likes, comments, shares for a published Instagram post.
+    post_id is the platform_post_id stored in published_posts.
+    """
+    creds = _get_creds("meta")
+    if not creds or not creds.get("access_token"):
+        raise HTTPException(400, "Meta credentials not configured")
+    insights = get_instagram_post_insights(
+        post_id=post_id,
+        access_token=creds["access_token"],
+    )
+    if "error" in insights:
+        raise HTTPException(400, insights["error"])
+    return {"ok": True, "post_id": post_id, "insights": insights}
