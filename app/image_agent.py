@@ -3,18 +3,21 @@ image_agent.py
 --------------
 Generates marketing banner images using an AI image generation API.
 
-Workflow:
-  1. Claude generates a detailed, brand-aligned image prompt
-  2. Image generation API creates the banner (DALL-E 3 or Ideogram)
-  3. Image bytes downloaded and uploaded to Supabase Storage
-  4. Asset row created in the assets table
-  5. Asset ID appended to the content_item's asset_ids
+Workflow (preferred — ideation asset present):
+  1. Fetch the existing image attached to the content item during ideation
+  2. Claude generates an enhancement prompt describing the subject
+  3. Ideogram /remix polishes the photo while preserving the original subject
+  4. Text overlay (headline + body) composited via image_overlay
+  5. Composited image uploaded to Supabase Storage + asset row created
+
+Workflow (fallback — no ideation asset):
+  1. Claude generates a brand-aligned text-to-image prompt
+  2. Ideogram /generate creates a fresh banner image
+  3–5. Same as above
 
 Env vars:
-  OPENAI_API_KEY      — enables DALL-E 3 (primary)
-  IDEOGRAM_API_KEY    — enables Ideogram V2 (set IMAGE_PROVIDER=ideogram)
-  IMAGE_PROVIDER      — "openai" (default) | "ideogram"
-  ASSETS_BUCKET       — storage bucket for generated images (default: "assets")
+  IDEOGRAM_API_KEY    — Ideogram V2 API key
+  ASSETS_BUCKET       — storage bucket for generated images (default: "generated-assets")
 """
 from __future__ import annotations
 
@@ -106,11 +109,28 @@ def _make_image_prompt(
 # ---------------------------------------------------------------------------
 # Image generation — Ideogram V2
 # ---------------------------------------------------------------------------
+
+_ASPECT_MAP = {"1024x1024": "ASPECT_1_1", "1792x1024": "ASPECT_16_9", "1024x1792": "ASPECT_9_16"}
+
+
+def _resolve_api_key(key_override: str) -> str:
+    key = key_override.strip() or IDEOGRAM_API_KEY
+    if not key:
+        raise RuntimeError(
+            "No image provider configured. Add your Ideogram API key in Settings → AI image generation."
+        )
+    return key
+
+
+def _download_image_url(url: str) -> bytes:
+    r = httpx.get(url, timeout=60.0, follow_redirects=True)
+    r.raise_for_status()
+    return r.content
+
+
 def _generate_ideogram(prompt: str, negative_prompt: str, size: str, api_key: str) -> bytes:
-    if not api_key:
-        raise RuntimeError("IDEOGRAM_API_KEY not configured")
-    aspect_map = {"1024x1024": "ASPECT_1_1", "1792x1024": "ASPECT_16_9", "1024x1792": "ASPECT_9_16"}
-    aspect = aspect_map.get(size, "ASPECT_1_1")
+    """Text-to-image via Ideogram V2 /generate."""
+    aspect = _ASPECT_MAP.get(size, "ASPECT_1_1")
     r = httpx.post(
         "https://api.ideogram.ai/generate",
         headers={"Api-Key": api_key, "Content-Type": "application/json"},
@@ -124,10 +144,41 @@ def _generate_ideogram(prompt: str, negative_prompt: str, size: str, api_key: st
         timeout=90.0,
     )
     r.raise_for_status()
-    image_url = r.json()["data"][0]["url"]
-    img = httpx.get(image_url, timeout=60.0)
-    img.raise_for_status()
-    return img.content
+    return _download_image_url(r.json()["data"][0]["url"])
+
+
+def _remix_ideogram(
+    source_bytes: bytes,
+    prompt: str,
+    negative_prompt: str,
+    size: str,
+    api_key: str,
+    image_weight: int = 70,
+) -> bytes:
+    """
+    Image-to-image remix via Ideogram V2 /remix.
+    image_weight: 0–100, higher = closer to the original photo (70 = good balance).
+    Sends source image as multipart/form-data.
+    """
+    import io as _io
+    aspect = _ASPECT_MAP.get(size, "ASPECT_1_1")
+    image_request = json.dumps({
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "aspect_ratio": aspect,
+        "model": "V_2",
+        "style_type": "REALISTIC",
+        "image_weight": image_weight,
+    })
+    r = httpx.post(
+        "https://api.ideogram.ai/remix",
+        headers={"Api-Key": api_key},
+        data={"image_request": image_request},
+        files={"image_file": ("source.jpg", _io.BytesIO(source_bytes), "image/jpeg")},
+        timeout=120.0,
+    )
+    r.raise_for_status()
+    return _download_image_url(r.json()["data"][0]["url"])
 
 
 def _generate_image(
@@ -136,13 +187,50 @@ def _generate_image(
     size: str,
     key_override: str = "",
 ) -> tuple[bytes, str]:
-    """Generate image bytes using Ideogram V2. Returns (bytes, 'ideogram')."""
-    api_key = key_override.strip() or IDEOGRAM_API_KEY
-    if not api_key:
-        raise RuntimeError(
-            "No image provider configured. Add your Ideogram API key in Settings → AI image generation."
+    """Text-to-image via Ideogram V2. Returns (bytes, 'ideogram')."""
+    return _generate_ideogram(prompt, negative_prompt, size, _resolve_api_key(key_override)), "ideogram"
+
+
+# ---------------------------------------------------------------------------
+# Ideation asset resolver
+# ---------------------------------------------------------------------------
+
+def _get_ideation_asset_url(sb: Client, content_item_id: str) -> str | None:
+    """
+    Return the public_url of the first non-AI image asset attached to this
+    content item (i.e. the photo selected during ideation).
+    Returns None if no such asset exists.
+    """
+    try:
+        item_res = (
+            sb.table("content_items")
+            .select("asset_ids")
+            .eq("id", content_item_id)
+            .single()
+            .execute()
         )
-    return _generate_ideogram(prompt, negative_prompt, size, api_key), "ideogram"
+        asset_ids: list = (item_res.data or {}).get("asset_ids") or []
+        if not asset_ids:
+            return None
+
+        assets_res = (
+            sb.table("assets")
+            .select("id,public_url,generator")
+            .in_("id", asset_ids)
+            .in_("asset_type", ["image"])
+            .is_("generator", "null")   # human-uploaded / ideation-picked only
+            .order("created_at", desc=False)
+            .limit(1)
+            .execute()
+        )
+        data = assets_res.data or []
+        url = data[0].get("public_url") if data else None
+        if url:
+            print(f"[image_agent] ideation asset found: {url[:80]}…", flush=True)
+        return url
+    except Exception as exc:
+        print(f"[image_agent] could not resolve ideation asset: {exc}", flush=True)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -223,11 +311,21 @@ def run_image_generation(
 
     print(f"[image_agent] prompt='{image_prompt[:120]}…' size={size}", flush=True)
 
-    # 3. Generate image
-    image_bytes, provider = _generate_image(
-        image_prompt, negative_prompt, size,
-        key_override=image_api_key,
-    )
+    # 3. Generate image — prefer remixing the ideation photo; fall back to text-to-image
+    api_key = _resolve_api_key(image_api_key)
+    source_url = _get_ideation_asset_url(sb, content_item_id) if content_item_id else None
+
+    if source_url:
+        try:
+            source_bytes = _download_image_url(source_url)
+            image_bytes  = _remix_ideogram(source_bytes, image_prompt, negative_prompt, size, api_key)
+            provider     = "ideogram-remix"
+            print(f"[image_agent] remix successful ({len(image_bytes)//1024} KB)", flush=True)
+        except Exception as exc:
+            print(f"[image_agent] remix failed ({exc}), falling back to text-to-image", flush=True)
+            image_bytes, provider = _generate_image(image_prompt, negative_prompt, size, image_api_key)
+    else:
+        image_bytes, provider = _generate_image(image_prompt, negative_prompt, size, image_api_key)
 
     # 3b. Composite headline + body copy using brand fonts and colour
     brand_color = _extract_brand_color(brand_context)
@@ -276,7 +374,7 @@ def run_image_generation(
                 "updated_at": _now(),
             }).eq("id", content_item_id).execute()
 
-    return {**saved, "_prompt": image_prompt, "_provider": provider, "_size": size}
+    return {**saved, "_prompt": image_prompt, "_provider": provider, "_size": size, "_source": "remix" if source_url else "generated"}
 
 
 # ---------------------------------------------------------------------------
