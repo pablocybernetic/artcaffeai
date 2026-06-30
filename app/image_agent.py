@@ -360,28 +360,18 @@ def run_image_generation(
 
     print(f"[image_agent] prompt='{image_prompt[:120]}…' size={size}", flush=True)
 
-    # 3. Generate image — prefer remixing the ideation photo; fall back to text-to-image
-    api_key = _resolve_api_key(image_api_key)
+    # 3. Source image — use ideation photo directly (no Ideogram remix needed:
+    #    product shots are already professional quality; remix only distorts them).
+    #    Only call Ideogram when there is no existing photo to work from.
     source_url = _get_ideation_asset_url(sb, content_item_id) if content_item_id else None
 
     if source_url:
-        try:
-            # Use a subject-preserving enhancement prompt, not a creative reimagining
-            remix_data     = _make_remix_prompt(anthropic, brand_context=brand_context, headline=headline, caption=caption, platform=platform)
-            remix_prompt   = remix_data.get("prompt", image_prompt).strip()
-            remix_negative = remix_data.get("negative_prompt", negative_prompt)
-            remix_size     = remix_data.get("size", size)
-            print(f"[image_agent] remix prompt='{remix_prompt[:120]}…'", flush=True)
-            source_bytes = _download_image_url(source_url)
-            # image_weight=85: 85% original composition preserved, 15% enhancement
-            image_bytes  = _remix_ideogram(source_bytes, remix_prompt, remix_negative, remix_size, api_key, image_weight=85)
-            provider     = "ideogram-remix"
-            size         = remix_size
-            print(f"[image_agent] remix successful ({len(image_bytes)//1024} KB)", flush=True)
-        except Exception as exc:
-            print(f"[image_agent] remix failed ({exc}), falling back to text-to-image", flush=True)
-            image_bytes, provider = _generate_image(image_prompt, negative_prompt, size, image_api_key)
+        source_bytes = _download_image_url(source_url)
+        image_bytes  = source_bytes
+        provider     = "ideation-asset"
+        print(f"[image_agent] using ideation asset directly ({len(image_bytes)//1024} KB)", flush=True)
     else:
+        _resolve_api_key(image_api_key)   # raises early if key missing
         image_bytes, provider = _generate_image(image_prompt, negative_prompt, size, image_api_key)
 
     # 3b. Composite headline + body copy using brand fonts and colour
