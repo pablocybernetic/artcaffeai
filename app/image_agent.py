@@ -28,7 +28,7 @@ import httpx
 from supabase import Client
 
 from brand_context import get_active
-from image_overlay import overlay_headline
+from image_overlay import overlay_creative
 
 # ---------------------------------------------------------------------------
 # Config
@@ -171,6 +171,19 @@ def _upload_to_storage(sb: Client, image_bytes: bytes, concept_id: str) -> tuple
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
+def _extract_brand_color(brand_context: dict) -> str:
+    """Pull primary brand colour hex from context JSON, fallback to Artcaffe green."""
+    for key in ("primary_color", "primary_colour"):
+        if brand_context.get(key):
+            return brand_context[key]
+    colors = brand_context.get("brand_colors") or brand_context.get("colors") or []
+    if isinstance(colors, list) and colors:
+        return colors[0] if isinstance(colors[0], str) else ""
+    if isinstance(colors, dict):
+        return colors.get("primary") or colors.get("main") or ""
+    return ""
+
+
 def run_image_generation(
     *,
     sb: Client,
@@ -216,8 +229,15 @@ def run_image_generation(
         key_override=image_api_key,
     )
 
-    # 3b. Burn headline text onto the image using brand fonts from storage
-    image_bytes = overlay_headline(image_bytes, headline, sb, anthropic=anthropic)
+    # 3b. Composite headline + body copy using brand fonts and colour
+    brand_color = _extract_brand_color(brand_context)
+    image_bytes = overlay_creative(
+        image_bytes, headline, sb,
+        body_text=caption,
+        brand_color=brand_color,
+        anthropic=anthropic,
+        platform=platform,
+    )
 
     # 4. Upload to storage
     bucket, storage_path, public_url = _upload_to_storage(sb, image_bytes, concept_id)
@@ -371,7 +391,7 @@ def apply_overlay_to_asset(
     try:
         r = httpx.get(public_url, timeout=30.0)
         r.raise_for_status()
-        composited = overlay_headline(r.content, headline, sb, anthropic=anthropic)
+        composited = overlay_creative(r.content, headline, sb, anthropic=anthropic)
 
         bucket, storage_path, new_url = _upload_to_storage(sb, composited, concept_id)
         filename = storage_path.split("/")[-1]
