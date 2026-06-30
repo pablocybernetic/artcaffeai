@@ -65,6 +65,55 @@ Image style guidelines:
 - Describe a real, photographic scene — not illustration or cartoon style\
 """
 
+REMIX_PROMPT_SYSTEM = """\
+You are a food photographer retouching an existing product photo for Artcaffe Coffee & Restaurant.
+The source image shows the exact food/product that must appear in the final banner — DO NOT change,
+replace, or add any food items. Your job is ONLY to describe photographic enhancements.
+
+Output ONLY a JSON object — no markdown, no prose:
+{
+  "prompt": "enhancement description",
+  "negative_prompt": "what to avoid",
+  "size": "1024x1024"
+}
+
+Rules:
+- Start with "Enhance this exact photo:" — never invent new subjects
+- Describe lighting, styling, and background improvements only
+- Keep the same food items, same plate/surface, same composition
+- Upgrade to: professional studio food photography, soft natural window light,
+  shallow depth of field, warm tones, clean neutral background or rustic wood surface
+- NO text, logos, or watermarks
+- Size: "1024x1024" for square posts, "1792x1024" for landscape, "1024x1792" for stories\
+"""
+
+
+def _make_remix_prompt(
+    anthropic: Any,
+    *,
+    brand_context: dict,
+    headline: str,
+    caption: str,
+    platform: str,
+) -> dict:
+    """Ask Claude to write an enhancement-only prompt (does not change the food subject)."""
+    user_msg = (
+        "BRAND CONTEXT:\n" + json.dumps(brand_context, indent=2) + "\n\n"
+        f"HEADLINE: {headline}\n"
+        f"CAPTION: {caption}\n"
+        f"PLATFORM: {platform}\n\n"
+        "Write a photographic enhancement prompt. Preserve the exact food subject in the source image."
+    )
+    resp = anthropic.messages.create(
+        model=MODEL,
+        max_tokens=400,
+        system=REMIX_PROMPT_SYSTEM,
+        messages=[{"role": "user", "content": user_msg}],
+        timeout=20.0,
+    )
+    raw = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+    return _parse_json(raw)
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -317,9 +366,17 @@ def run_image_generation(
 
     if source_url:
         try:
+            # Use a subject-preserving enhancement prompt, not a creative reimagining
+            remix_data     = _make_remix_prompt(anthropic, brand_context=brand_context, headline=headline, caption=caption, platform=platform)
+            remix_prompt   = remix_data.get("prompt", image_prompt).strip()
+            remix_negative = remix_data.get("negative_prompt", negative_prompt)
+            remix_size     = remix_data.get("size", size)
+            print(f"[image_agent] remix prompt='{remix_prompt[:120]}…'", flush=True)
             source_bytes = _download_image_url(source_url)
-            image_bytes  = _remix_ideogram(source_bytes, image_prompt, negative_prompt, size, api_key)
+            # image_weight=85: 85% original composition preserved, 15% enhancement
+            image_bytes  = _remix_ideogram(source_bytes, remix_prompt, remix_negative, remix_size, api_key, image_weight=85)
             provider     = "ideogram-remix"
+            size         = remix_size
             print(f"[image_agent] remix successful ({len(image_bytes)//1024} KB)", flush=True)
         except Exception as exc:
             print(f"[image_agent] remix failed ({exc}), falling back to text-to-image", flush=True)
