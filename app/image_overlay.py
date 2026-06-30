@@ -142,12 +142,10 @@ AVAILABLE FONTS (use EXACT filenames):
 {fonts_list}
 
 Rules:
-- Choose headline_font and body_font from the list above — they MUST be different files
-- For a clean premium look: pair a bold/display font (headline) with a lighter/book weight (body)
-- Paris.otf or GaramondITCbyBT-Bold.otf = editorial/elegant headline
-- Gotham-Medium.otf = strong modern headline
-- Gotham-Book.otf / Gotham-Light.otf = clean readable body
-- Lovelo_Line_Light.otf = decorative accent, good for body on dark backgrounds
+- headline_font MUST be Gotham-Medium.otf or Gotham-Bold.otf (primary brand headline fonts)
+  — only use another font if neither is in the list above
+- body_font must be a DIFFERENT file from headline_font
+- Good body font choices: Gotham-Book.otf, Gotham-Light.otf, Lovelo_Line_Light.otf
 
 Reply ONLY with valid JSON (no markdown, no explanation):
 {{"template":"hero","placement":"center","headline_font":"Gotham-Medium.otf","body_font":"Gotham-Light.otf"}}"""
@@ -177,6 +175,15 @@ Reply ONLY with valid JSON (no markdown, no explanation):
         if placement not in ("top", "center", "bottom"):        placement = "center"
         if h_font not in font_names: h_font = default_h
         if b_font not in font_names: b_font = default_b
+
+        # Enforce brand rule: headline must be a Gotham bold/medium weight
+        _HEADLINE_REQUIRED = ["Gotham-Medium.otf", "Gotham-Bold.otf"]
+        approved_h = next((f for f in _HEADLINE_REQUIRED if f in font_names), None)
+        if approved_h and h_font not in _HEADLINE_REQUIRED:
+            print(f"[image_overlay] overriding headline font {h_font} → {approved_h}", flush=True)
+            h_font = approved_h
+
+        # Ensure body is always a different font from headline
         if h_font == b_font and len(font_names) > 1:
             b_font = next((f for f in font_names if f != h_font), b_font)
 
@@ -187,8 +194,11 @@ Reply ONLY with valid JSON (no markdown, no explanation):
 
     except Exception as exc:
         print(f"[image_overlay] design pick failed ({exc}), using defaults", flush=True)
+        _HEADLINE_REQUIRED = ["Gotham-Medium.otf", "Gotham-Bold.otf"]
+        fallback_h = next((f for f in _HEADLINE_REQUIRED if f in font_names), default_h)
+        fallback_b = next((f for f in font_names if f != fallback_h), default_b)
         return {"template": "hero", "placement": "center",
-                "headline_font": default_h, "body_font": default_b}
+                "headline_font": fallback_h, "body_font": fallback_b}
 
 
 # ── Text utilities ───────────────────────────────────────────────────────────
