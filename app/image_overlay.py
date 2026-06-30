@@ -166,13 +166,17 @@ def _pick_layout(image_bytes: bytes, anthropic: Any, platform: str) -> dict:
                     {"type": "text", "text": (
                         f"This image is for a {platform} marketing creative. "
                         "Choose the best layout template:\n"
-                        "  hero  — full image, gradient scrim, text in bottom-left area\n"
-                        "  band  — image top 60%, brand-colour band bottom with text\n"
-                        "  split — image right half, colour panel left half with text\n"
-                        "  solid — solid colour background, no photo visible\n\n"
-                        "For hero, also choose placement: bottom (default) / center / top\n"
-                        "Prefer 'band' for busy or complex food/product photos.\n"
-                        "Reply ONLY with JSON: {\"template\":\"band\",\"placement\":\"bottom\"}"
+                        "  hero  — full-bleed image, brand-colour tint washes over lower half, "
+                        "bold centered text — best for clean food/product shots on a plain background\n"
+                        "  band  — image fills top 68 %, solid brand-colour panel bottom 32 % — "
+                        "best for busy/complex scenes where text needs its own zone\n"
+                        "  split — image right 55 %, colour panel left 45 % with text — "
+                        "best for portrait/story formats\n"
+                        "  solid — solid colour + faint photo texture, large centered type — "
+                        "best when the image is low quality or mood-only\n\n"
+                        "For hero, also pick placement: center (default) / bottom / top\n"
+                        "Pick the template that makes the image look most like a premium editorial ad.\n"
+                        "Reply ONLY with JSON: {\"template\":\"hero\",\"placement\":\"center\"}"
                     )},
                 ],
             }],
@@ -188,8 +192,8 @@ def _pick_layout(image_bytes: bytes, anthropic: Any, platform: str) -> dict:
         print(f"[image_overlay] layout={template} placement={placement}", flush=True)
         return {"template": template, "placement": placement}
     except Exception as exc:
-        print(f"[image_overlay] layout pick failed ({exc}), using band/bottom", flush=True)
-        return {"template": "band", "placement": "bottom"}
+        print(f"[image_overlay] layout pick failed ({exc}), using hero/center", flush=True)
+        return {"template": "hero", "placement": "center"}
 
 
 # ── Text utilities ───────────────────────────────────────────────────────────
@@ -316,47 +320,61 @@ def _cover_crop(img: "Image.Image", target_w: int, target_h: int) -> "Image.Imag
 # ── Template renderers ───────────────────────────────────────────────────────
 
 def _render_hero(img, headline, body, h_font, b_font, brand_color, placement):
+    """
+    Full-bleed image with a brand-colour tint wash over the lower half
+    and a strong gradient fade — Pomelli-style editorial look.
+    Text is centered for maximum impact on the tinted zone.
+    """
     from PIL import Image, ImageDraw
 
     W, H   = img.size
-    canvas = img.convert("RGBA").copy()
+    canvas = _cover_crop(img.convert("RGBA"), W, H).copy()
 
-    pad_x  = int(W * 0.07)
+    r, g, b = _hex_to_rgb(brand_color)
+
+    # ── Brand-colour tint wash over bottom ~55 % of image ────────────────────
+    tint = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    td   = ImageDraw.Draw(tint)
+    fade_start = int(H * 0.35)       # tint starts fading in here
+    fade_end   = int(H * 0.62)       # fully opaque brand colour from here down
+    max_alpha  = 210                  # solid zone opacity (high for readability)
+
+    for i in range(fade_end - fade_start):
+        alpha = int(max_alpha * (i / (fade_end - fade_start)) ** 1.4)
+        y = fade_start + i
+        td.line([(0, y), (W, y)], fill=(r, g, b, alpha))
+    td.rectangle([(0, fade_end), (W, H)], fill=(r, g, b, max_alpha))
+    canvas = Image.alpha_composite(canvas, tint)
+
+    # ── Measure text block ────────────────────────────────────────────────────
+    pad_x  = int(W * 0.08)
     pad_y  = int(H * 0.05)
     max_tw = W - pad_x * 2
 
-    # Measure full text block height
     tmp   = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
     h_lh  = _line_h(h_font, tmp)
     b_lh  = _line_h(b_font, tmp)
     n_hl  = min(3, len(_wrap(headline.upper(), h_font, max_tw, tmp)))
-    n_bl  = min(3, len(_wrap(body, b_font, max_tw, tmp))) if body else 0
-    gap   = max(8, int(h_lh * 0.18))
-    b_gap = max(6, int(b_lh * 0.18))
+    n_bl  = min(2, len(_wrap(body, b_font, max_tw, tmp))) if body else 0
+    gap   = max(10, int(h_lh * 0.20))
+    b_gap = max(6,  int(b_lh * 0.18))
     block_h = (
         h_lh * n_hl + gap * n_hl
         + (b_lh * n_bl + b_gap * n_bl + gap if n_bl else 0)
     )
 
-    # Text Y based on placement (default bottom)
-    if placement in ("top",):
-        text_y = pad_y
-    elif placement in ("upper-third",):
-        text_y = int(H * 0.14)
-    elif placement == "center":
-        text_y = (H - block_h) // 2
-    else:  # bottom / lower-third — default
-        text_y = H - block_h - pad_y
+    # Place text in the tinted zone, centered horizontally
+    tint_center_y = fade_end + (H - fade_end) // 2
+    text_y = max(fade_end + pad_y, tint_center_y - block_h // 2)
 
-    # Draw scrim — covers from (text_y - 2*pad_y) to bottom
-    scrim_top = max(0, text_y - pad_y * 2)
-    scrim     = _draw_scrim(W, H, scrim_top, fade_height=int(H * 0.12))
-    canvas    = Image.alpha_composite(canvas, scrim)
-
-    # Draw text left-aligned over scrim
-    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d       = ImageDraw.Draw(overlay)
-    _draw_text_block(d, headline, body, h_font, b_font, max_tw, pad_x, text_y, (240, 235, 228), align="left")
+    text_rgb = _text_color(brand_color)
+    overlay  = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d        = ImageDraw.Draw(overlay)
+    _draw_text_block(
+        d, headline, body, h_font, b_font,
+        max_tw, W // 2, text_y, text_rgb,
+        align="center", shadow=False,
+    )
     return Image.alpha_composite(canvas, overlay)
 
 
@@ -364,7 +382,7 @@ def _render_band(img, headline, body, h_font, b_font, brand_color):
     from PIL import Image, ImageDraw
 
     W, H   = img.size
-    img_h  = int(H * 0.60)
+    img_h  = int(H * 0.68)   # image takes 68 %, band only 32 %
     band_h = H - img_h
 
     canvas = Image.new("RGBA", (W, H), (0, 0, 0, 255))
@@ -502,7 +520,7 @@ def overlay_creative(
         if not color.startswith("#"):
             color = _DEFAULT_COLOR
 
-        layout    = _pick_layout(image_bytes, anthropic, platform) if anthropic else {"template": "band", "placement": "bottom"}
+        layout    = _pick_layout(image_bytes, anthropic, platform) if anthropic else {"template": "hero", "placement": "center"}
         template  = layout["template"]
         placement = layout["placement"]
 
