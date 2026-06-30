@@ -3,16 +3,14 @@ image_overlay.py
 ----------------
 Composites branded text onto a marketing image using one of four layout templates.
 
-Templates (Claude picks automatically):
-  hero   — full-bleed image, dark gradient scrim, left-aligned headline + body
-  band   — image fills top 60 %, solid brand-colour band fills bottom 40 %
-  split  — image fills right 55 %, brand-colour panel fills left 45 %
-  solid  — solid brand colour (no photo), centered typographic card
+Templates (Claude picks automatically by looking at the image):
+  hero   — full-bleed image, brand-colour tint over lower half, centered text
+  band   — image fills top 68 %, solid brand-colour band bottom 32 %
+  split  — image right 55 %, colour panel left 45 % with text
+  solid  — solid brand colour + faint photo texture, centered type
 
-Font priority:
-  1. Custom font uploaded to Supabase `fonts` bucket (Gotham, etc.)
-  2. Clean sans-serif from the Ubuntu system fonts (LiberationSans / DejaVu)
-  3. Pillow built-in default (last resort only)
+Claude also chooses the font pair (headline + body) from the uploaded bucket fonts.
+No system fonts are used — only fonts uploaded to the Supabase `fonts` bucket.
 """
 from __future__ import annotations
 
@@ -29,94 +27,46 @@ FONTS_BUCKET   = os.environ.get("FONTS_BUCKET", "fonts")
 _LAYOUT_MODEL  = "claude-haiku-4-5-20251001"
 _DEFAULT_COLOR = "#1B3A2A"   # Artcaffe forest green
 
-# ── Custom font preference (names in Supabase bucket) ────────────────────────
-_BOLD_PREF = [
-    "Gotham-Medium.otf", "Gotham-Bold.otf", "Gotham-Black.otf",
-    "GaramondITCbyBT-Bold.otf", "Paris.otf",
-]
-_LIGHT_PREF = [
-    "Gotham-Book.otf", "Gotham-Light.otf", "Lovelo_Line_Light.otf",
-    "GaramondITCbyBT-Book.otf",
-]
-
-# ── System font fallback paths (Ubuntu / Debian VM) ──────────────────────────
-_SYS_BOLD = [
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-    "/usr/share/fonts/opentype/noto/NotoSans-Bold.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
-]
-_SYS_REGULAR = [
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-    "/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-]
-
 
 # ── Font loading ─────────────────────────────────────────────────────────────
 
-def _fetch_fonts(sb: Client) -> dict[str, Optional[bytes]]:
-    """Return {'bold': bytes|None, 'light': bytes|None} from Supabase fonts bucket."""
+def _load_font_map(sb: Client) -> dict[str, bytes]:
+    """
+    Load ALL fonts from the Supabase bucket.
+    Returns {filename: bytes} for every font that downloads successfully.
+    """
     try:
         listing = sb.storage.from_(FONTS_BUCKET).list("", {"limit": 100})
-        available = [
-            f.get("name", "") for f in (listing or [])
+        names = [
+            f["name"] for f in (listing or [])
             if f.get("name") and f["name"] != ".emptyFolderPlaceholder"
         ]
-        print(f"[image_overlay] fonts in bucket: {available}", flush=True)
+        print(f"[image_overlay] fonts in bucket: {names}", flush=True)
     except Exception as e:
-        print(f"[image_overlay] could not list fonts bucket: {e}", flush=True)
-        available = []
+        print(f"[image_overlay] font listing failed: {e}", flush=True)
+        return {}
 
-    def _load_first(candidates: list[str]) -> Optional[bytes]:
-        for name in candidates:
-            try:
-                data = sb.storage.from_(FONTS_BUCKET).download(name)
-                if data:
-                    print(f"[image_overlay] loaded bucket font: {name}", flush=True)
-                    return data
-            except Exception:
-                continue
-        return None
-
-    bold_pref  = _BOLD_PREF  + [n for n in available if any(k in n.lower() for k in ("bold","medium","heavy","black"))]
-    light_pref = _LIGHT_PREF + [n for n in available if any(k in n.lower() for k in ("light","book","regular","thin"))]
-    fallback   = list(dict.fromkeys(bold_pref + light_pref + available))
-
-    bold  = _load_first(bold_pref)  or _load_first(fallback)
-    light = _load_first(light_pref) or bold
-    return {"bold": bold, "light": light}
+    font_map: dict[str, bytes] = {}
+    for name in names:
+        try:
+            data = sb.storage.from_(FONTS_BUCKET).download(name)
+            if data:
+                font_map[name] = data
+        except Exception as e:
+            print(f"[image_overlay] could not load {name}: {e}", flush=True)
+    print(f"[image_overlay] loaded {len(font_map)} fonts: {list(font_map)}", flush=True)
+    return font_map
 
 
-def _pil_font(font_bytes: Optional[bytes], size: int, role: str = "bold"):
-    """
-    Load a PIL font at `size`.
-    Priority: bucket bytes → system sans-serif → PIL default.
-    """
+def _pil_font(font_bytes: Optional[bytes], size: int):
+    """Load a PIL font from bytes. Falls back to PIL built-in only if bytes fail."""
     from PIL import ImageFont
-
     if font_bytes:
         try:
             return ImageFont.truetype(io.BytesIO(font_bytes), size)
         except Exception as e:
-            print(f"[image_overlay] bucket font load failed: {e}", flush=True)
-
-    # Try clean system sans-serif
-    sys_paths = _SYS_BOLD if role == "bold" else _SYS_REGULAR
-    for path in sys_paths:
-        if os.path.exists(path):
-            try:
-                f = ImageFont.truetype(path, size)
-                print(f"[image_overlay] using system font: {path}", flush=True)
-                return f
-            except Exception:
-                continue
-
-    # Last resort: PIL built-in (may be tiny; at least won't crash)
-    print("[image_overlay] WARNING: falling back to PIL default font", flush=True)
+            print(f"[image_overlay] font load failed: {e}", flush=True)
+    print("[image_overlay] WARNING: no bucket font available, using PIL default", flush=True)
     try:
         return ImageFont.load_default(size=size)
     except TypeError:
@@ -141,13 +91,27 @@ def _text_color(bg_hex: str) -> tuple[int, int, int]:
     return (240, 235, 228) if _luminance(r, g, b) < 140 else (18, 16, 14)
 
 
-# ── Claude layout picker ─────────────────────────────────────────────────────
+# ── Claude design picker ─────────────────────────────────────────────────────
 
-def _pick_layout(image_bytes: bytes, anthropic: Any, platform: str) -> dict:
+def _pick_design(
+    image_bytes: bytes,
+    anthropic: Any,
+    platform: str,
+    font_names: list[str],
+) -> dict:
     """
-    Ask Claude Haiku to choose template + hero text placement.
-    Falls back to band/bottom if the call fails.
+    Ask Claude to look at the product image and decide:
+      - layout template (hero / band / split / solid)
+      - text placement for hero (center / bottom / top)
+      - headline_font — one of the uploaded font filenames
+      - body_font     — a DIFFERENT uploaded font filename
+
+    Returns dict with those four keys. Falls back to safe defaults if call fails.
     """
+    # Safe defaults (use first two fonts available, or same font twice)
+    default_h = font_names[0] if font_names else ""
+    default_b = font_names[1] if len(font_names) > 1 else default_h
+
     try:
         from PIL import Image
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -156,44 +120,75 @@ def _pick_layout(image_bytes: bytes, anthropic: Any, platform: str) -> dict:
         img.save(buf, format="JPEG", quality=70)
         b64 = base64.standard_b64encode(buf.getvalue()).decode()
 
+        fonts_list = "\n".join(f"  - {n}" for n in font_names)
+
+        prompt = f"""You are a brand designer creating a {platform} marketing creative for Artcaffe Coffee & Restaurant.
+
+Look at this product photo and design the text overlay. Choose:
+
+LAYOUT TEMPLATES:
+  hero  — full-bleed image, brand-colour tint over lower half, bold centered text
+          → best for clean product shots on plain/white backgrounds
+  band  — image top 68%, solid brand-colour panel bottom 32% with text
+          → best for busy scenes or when the subject fills the whole frame
+  split — colour panel left 45%, image right 55%
+          → best for portrait/story format
+  solid — solid brand colour fills card, faint image texture behind text
+          → best when image quality is low or you want a typographic card
+
+PLACEMENT (hero only): center / bottom / top
+
+AVAILABLE FONTS (use EXACT filenames):
+{fonts_list}
+
+Rules:
+- Choose headline_font and body_font from the list above — they MUST be different files
+- For a clean premium look: pair a bold/display font (headline) with a lighter/book weight (body)
+- Paris.otf or GaramondITCbyBT-Bold.otf = editorial/elegant headline
+- Gotham-Medium.otf = strong modern headline
+- Gotham-Book.otf / Gotham-Light.otf = clean readable body
+- Lovelo_Line_Light.otf = decorative accent, good for body on dark backgrounds
+
+Reply ONLY with valid JSON (no markdown, no explanation):
+{{"template":"hero","placement":"center","headline_font":"Gotham-Medium.otf","body_font":"Gotham-Light.otf"}}"""
+
         resp = anthropic.messages.create(
             model=_LAYOUT_MODEL,
-            max_tokens=80,
+            max_tokens=120,
             messages=[{
                 "role": "user",
                 "content": [
                     {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-                    {"type": "text", "text": (
-                        f"This image is for a {platform} marketing creative. "
-                        "Choose the best layout template:\n"
-                        "  hero  — full-bleed image, brand-colour tint washes over lower half, "
-                        "bold centered text — best for clean food/product shots on a plain background\n"
-                        "  band  — image fills top 68 %, solid brand-colour panel bottom 32 % — "
-                        "best for busy/complex scenes where text needs its own zone\n"
-                        "  split — image right 55 %, colour panel left 45 % with text — "
-                        "best for portrait/story formats\n"
-                        "  solid — solid colour + faint photo texture, large centered type — "
-                        "best when the image is low quality or mood-only\n\n"
-                        "For hero, also pick placement: center (default) / bottom / top\n"
-                        "Pick the template that makes the image look most like a premium editorial ad.\n"
-                        "Reply ONLY with JSON: {\"template\":\"hero\",\"placement\":\"center\"}"
-                    )},
+                    {"type": "text", "text": prompt},
                 ],
             }],
-            timeout=20.0,
+            timeout=25.0,
         )
         raw = resp.content[0].text.strip()
-        m = re.search(r'\{[^}]+\}', raw)
-        result    = json.loads(m.group()) if m else {}
-        template  = result.get("template", "band")
-        placement = result.get("placement", "bottom")
-        if template  not in ("hero", "band", "split", "solid"): template  = "band"
-        if placement not in ("top", "upper-third", "center", "lower-third", "bottom"): placement = "bottom"
-        print(f"[image_overlay] layout={template} placement={placement}", flush=True)
-        return {"template": template, "placement": placement}
+        m   = re.search(r'\{[^}]+\}', raw, re.DOTALL)
+        result = json.loads(m.group()) if m else {}
+
+        template  = result.get("template", "hero")
+        placement = result.get("placement", "center")
+        h_font    = result.get("headline_font", default_h)
+        b_font    = result.get("body_font", default_b)
+
+        if template  not in ("hero", "band", "split", "solid"): template  = "hero"
+        if placement not in ("top", "center", "bottom"):        placement = "center"
+        if h_font not in font_names: h_font = default_h
+        if b_font not in font_names: b_font = default_b
+        if h_font == b_font and len(font_names) > 1:
+            b_font = next((f for f in font_names if f != h_font), b_font)
+
+        print(f"[image_overlay] design: template={template} placement={placement} "
+              f"headline={h_font} body={b_font}", flush=True)
+        return {"template": template, "placement": placement,
+                "headline_font": h_font, "body_font": b_font}
+
     except Exception as exc:
-        print(f"[image_overlay] layout pick failed ({exc}), using hero/center", flush=True)
-        return {"template": "hero", "placement": "center"}
+        print(f"[image_overlay] design pick failed ({exc}), using defaults", flush=True)
+        return {"template": "hero", "placement": "center",
+                "headline_font": default_h, "body_font": default_b}
 
 
 # ── Text utilities ───────────────────────────────────────────────────────────
@@ -520,9 +515,24 @@ def overlay_creative(
         if not color.startswith("#"):
             color = _DEFAULT_COLOR
 
-        layout    = _pick_layout(image_bytes, anthropic, platform) if anthropic else {"template": "hero", "placement": "center"}
-        template  = layout["template"]
-        placement = layout["placement"]
+        # Load all bucket fonts first — Claude needs the list to pick from
+        font_map   = _load_font_map(sb)
+        font_names = list(font_map.keys())
+
+        # Claude sees the image + font list and decides layout + font pair
+        if anthropic and font_names:
+            design = _pick_design(image_bytes, anthropic, platform, font_names)
+        else:
+            design = {
+                "template": "hero", "placement": "center",
+                "headline_font": font_names[0] if font_names else "",
+                "body_font":     font_names[1] if len(font_names) > 1 else (font_names[0] if font_names else ""),
+            }
+
+        template   = design["template"]
+        placement  = design["placement"]
+        h_fname    = design["headline_font"]
+        b_fname    = design["body_font"]
 
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         W, H = img.size
@@ -536,9 +546,8 @@ def overlay_creative(
             h_size = max(34, int(h_size * 0.72))
             b_size = max(16, int(b_size * 0.82))
 
-        fonts  = _fetch_fonts(sb)
-        h_font = _pil_font(fonts["bold"],  h_size, role="bold")
-        b_font = _pil_font(fonts["light"], b_size, role="regular")
+        h_font = _pil_font(font_map.get(h_fname), h_size)
+        b_font = _pil_font(font_map.get(b_fname), b_size)
 
         if template == "hero":
             result = _render_hero(img, headline, body_text, h_font, b_font, color, placement)
@@ -552,7 +561,8 @@ def overlay_creative(
         buf = io.BytesIO()
         result.convert("RGB").save(buf, format="PNG", optimize=True)
         data = buf.getvalue()
-        print(f"[image_overlay] {template} template — {len(data)//1024} KB, color={color}", flush=True)
+        print(f"[image_overlay] {template}/{placement} h={h_fname} b={b_fname} "
+              f"— {len(data)//1024} KB", flush=True)
         return data
 
     except Exception as exc:
