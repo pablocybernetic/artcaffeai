@@ -1,16 +1,24 @@
 """
 image_overlay.py
 ----------------
-Composites branded text onto a marketing image using one of four layout templates.
+Composites branded text onto a marketing image.
 
-Templates (Claude picks automatically by looking at the image):
-  hero   — full-bleed image, brand-colour tint over lower half, centered text
-  band   — image fills top 68 %, solid brand-colour band bottom 32 %
-  split  — image right 55 %, colour panel left 45 % with text
-  solid  — solid brand colour + faint photo texture, centered type
+Compliant with Artcaffe Image Guidelines 2026, section 7:
+  ✅  White bold text on naturally dark photo area (no modification to photo)
+  ✅  Narrow semi-transparent DARK bar (60-70 % black) when photo is busy
+  ❌  Full colour tint / brand-colour overlay — NEVER applied over photos
 
-Claude also chooses the font pair (headline + body) from the uploaded bucket fonts.
-No system fonts are used — only fonts uploaded to the Supabase `fonts` bucket.
+Templates (Claude picks by looking at the image):
+  bar    — full-bleed photo + narrow dark bar (28% H) at bottom, white text
+           → use when photo is busy / no clean dark area
+  clean  — full-bleed photo, white text sits directly on a dark area of the image
+           → use when photo already has a dark zone (shadow, dark background)
+  split  — image right 55%, brand-colour panel left 45% — purely typographic zone
+           → use for portrait/story formats where a text panel makes sense
+  solid  — typographic card, brand colour background, no full-photo overlay
+           → only when there is no usable photo (e.g. text-only campaigns)
+
+Claude chooses font pair (headline + body) from the uploaded bucket fonts.
 """
 from __future__ import annotations
 
@@ -101,8 +109,8 @@ def _pick_design(
 ) -> dict:
     """
     Ask Claude to look at the product image and decide:
-      - layout template (hero / band / split / solid)
-      - text placement for hero (center / bottom / top)
+      - layout template (bar / clean / split / solid)
+      - text placement for clean (top / center / bottom)
       - headline_font — one of the uploaded font filenames
       - body_font     — a DIFFERENT uploaded font filename
 
@@ -124,19 +132,24 @@ def _pick_design(
 
         prompt = f"""You are a brand designer creating a {platform} marketing creative for Artcaffe Coffee & Restaurant.
 
-Look at this product photo and design the text overlay. Choose:
+Artcaffe Image Guidelines 2026 — MUST FOLLOW:
+- NEVER apply a brand-colour tint over a photograph
+- Use only a narrow DARK (black) bar overlay when the photo needs text contrast
+
+Look at this product photo and design the text overlay. Choose ONE template:
 
 LAYOUT TEMPLATES:
-  hero  — full-bleed image, brand-colour tint over lower half, bold centered text
-          → best for clean product shots on plain/white backgrounds
-  band  — image top 68%, solid brand-colour panel bottom 32% with text
-          → best for busy scenes or when the subject fills the whole frame
-  split — colour panel left 45%, image right 55%
-          → best for portrait/story format
-  solid — solid brand colour fills card, faint image texture behind text
-          → best when image quality is low or you want a typographic card
+  bar   — full-bleed photo + narrow dark bar (28% height) at BOTTOM, white text
+          → DEFAULT: use when photo is busy or subject fills the whole frame
+  clean — full-bleed photo, white text placed on an already-dark area of the image
+          → only if photo has a naturally dark corner/zone with no important subject
+  split — brand-colour panel left 45%, image right 55%
+          → best for portrait/story format where a typographic panel makes sense
+  solid — brand colour background, faint image texture, no photo overlay
+          → only when image quality is very low or campaign is purely typographic
 
-PLACEMENT (hero only): center / bottom / top
+PLACEMENT (clean template only): top / center / bottom
+  → where in the photo the naturally dark zone is
 
 AVAILABLE FONTS (use EXACT filenames):
 {fonts_list}
@@ -148,7 +161,7 @@ Rules:
 - Good body font choices: Gotham-Book.otf, Gotham-Light.otf, Lovelo_Line_Light.otf
 
 Reply ONLY with valid JSON (no markdown, no explanation):
-{{"template":"hero","placement":"center","headline_font":"Gotham-Medium.otf","body_font":"Gotham-Light.otf"}}"""
+{{"template":"bar","placement":"bottom","headline_font":"Gotham-Medium.otf","body_font":"Gotham-Light.otf"}}"""
 
         resp = anthropic.messages.create(
             model=_LAYOUT_MODEL,
@@ -171,8 +184,8 @@ Reply ONLY with valid JSON (no markdown, no explanation):
         h_font    = result.get("headline_font", default_h)
         b_font    = result.get("body_font", default_b)
 
-        if template  not in ("hero", "band", "split", "solid"): template  = "hero"
-        if placement not in ("top", "center", "bottom"):        placement = "center"
+        if template  not in ("bar", "clean", "split", "solid"): template  = "bar"
+        if placement not in ("top", "center", "bottom"):       placement = "bottom"
         if h_font not in font_names: h_font = default_h
         if b_font not in font_names: b_font = default_b
 
@@ -197,7 +210,7 @@ Reply ONLY with valid JSON (no markdown, no explanation):
         _HEADLINE_REQUIRED = ["Gotham-Medium.otf", "Gotham-Bold.otf"]
         fallback_h = next((f for f in _HEADLINE_REQUIRED if f in font_names), default_h)
         fallback_b = next((f for f in font_names if f != fallback_h), default_b)
-        return {"template": "hero", "placement": "center",
+        return {"template": "bar", "placement": "bottom",
                 "headline_font": fallback_h, "body_font": fallback_b}
 
 
@@ -324,108 +337,100 @@ def _cover_crop(img: "Image.Image", target_w: int, target_h: int) -> "Image.Imag
 
 # ── Template renderers ───────────────────────────────────────────────────────
 
-def _render_hero(img, headline, body, h_font, b_font, brand_color, placement):
+def _render_bar(img, headline, body, h_font, b_font):
     """
-    Full-bleed image with a brand-colour tint wash over the lower half
-    and a strong gradient fade — Pomelli-style editorial look.
-    Text is centered for maximum impact on the tinted zone.
+    Full-bleed photo + narrow dark bar at bottom (28 % height, 65 % black opacity).
+    Per brand guidelines: dark overlay bar only — never brand-colour tint over photo.
+    White text inside the bar, left-aligned with left padding.
     """
     from PIL import Image, ImageDraw
 
-    W, H   = img.size
-    canvas = _cover_crop(img.convert("RGBA"), W, H).copy()
-
-    r, g, b = _hex_to_rgb(brand_color)
-
-    # ── Brand-colour tint wash over bottom ~55 % of image ────────────────────
-    tint = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    td   = ImageDraw.Draw(tint)
-    fade_start = int(H * 0.35)       # tint starts fading in here
-    fade_end   = int(H * 0.62)       # fully opaque brand colour from here down
-    max_alpha  = 210                  # solid zone opacity (high for readability)
-
-    for i in range(fade_end - fade_start):
-        alpha = int(max_alpha * (i / (fade_end - fade_start)) ** 1.4)
-        y = fade_start + i
-        td.line([(0, y), (W, y)], fill=(r, g, b, alpha))
-    td.rectangle([(0, fade_end), (W, H)], fill=(r, g, b, max_alpha))
-    canvas = Image.alpha_composite(canvas, tint)
-
-    # ── Measure text block ────────────────────────────────────────────────────
-    pad_x  = int(W * 0.08)
-    pad_y  = int(H * 0.05)
-    max_tw = W - pad_x * 2
-
-    tmp   = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
-    h_lh  = _line_h(h_font, tmp)
-    b_lh  = _line_h(b_font, tmp)
-    n_hl  = min(3, len(_wrap(headline.upper(), h_font, max_tw, tmp)))
-    n_bl  = min(2, len(_wrap(body, b_font, max_tw, tmp))) if body else 0
-    gap   = max(10, int(h_lh * 0.20))
-    b_gap = max(6,  int(b_lh * 0.18))
-    block_h = (
-        h_lh * n_hl + gap * n_hl
-        + (b_lh * n_bl + b_gap * n_bl + gap if n_bl else 0)
-    )
-
-    # Place text in the tinted zone, centered horizontally
-    tint_center_y = fade_end + (H - fade_end) // 2
-    text_y = max(fade_end + pad_y, tint_center_y - block_h // 2)
-
-    text_rgb = _text_color(brand_color)
-    overlay  = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d        = ImageDraw.Draw(overlay)
-    _draw_text_block(
-        d, headline, body, h_font, b_font,
-        max_tw, W // 2, text_y, text_rgb,
-        align="center", shadow=False,
-    )
-    return Image.alpha_composite(canvas, overlay)
-
-
-def _render_band(img, headline, body, h_font, b_font, brand_color):
-    from PIL import Image, ImageDraw
-
-    W, H   = img.size
-    img_h  = int(H * 0.68)   # image takes 68 %, band only 32 %
-    band_h = H - img_h
-
-    canvas = Image.new("RGBA", (W, H), (0, 0, 0, 255))
-    photo  = _cover_crop(img.convert("RGBA"), W, img_h)
-    canvas.paste(photo, (0, 0))
-
-    r, g, b = _hex_to_rgb(brand_color)
-    d = ImageDraw.Draw(canvas)
-    d.rectangle([(0, img_h), (W, H)], fill=(r, g, b, 255))
-
-    # Tight divider line between image and band (lighter tint)
-    lr, lg, lb = min(r+30,255), min(g+30,255), min(b+30,255)
-    d.rectangle([(0, img_h), (W, img_h + 2)], fill=(lr, lg, lb, 180))
-
-    text_rgb = _text_color(brand_color)
+    W, H     = img.size
+    canvas   = _cover_crop(img.convert("RGBA"), W, H).copy()
+    bar_h    = int(H * 0.28)
+    bar_top  = H - bar_h
     pad_x    = int(W * 0.07)
     max_tw   = W - pad_x * 2
 
+    # Fade + solid dark bar — no brand colour, pure dark for readability
+    bar = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    bd  = ImageDraw.Draw(bar)
+    fade_h = int(bar_h * 0.35)
+    for i in range(fade_h):
+        alpha = int(168 * (i / fade_h) ** 1.6)
+        y = bar_top - fade_h + i
+        if 0 <= y < H:
+            bd.line([(0, y), (W, y)], fill=(0, 0, 0, alpha))
+    bd.rectangle([(0, bar_top), (W, H)], fill=(0, 0, 0, 168))  # ~66 % opacity
+    canvas = Image.alpha_composite(canvas, bar)
+
+    # Measure block to vertically center in bar
     tmp    = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
     h_lh   = _line_h(h_font, tmp)
     b_lh   = _line_h(b_font, tmp)
     n_hl   = min(2, len(_wrap(headline.upper(), h_font, max_tw, tmp)))
     n_bl   = min(2, len(_wrap(body, b_font, max_tw, tmp))) if body else 0
     gap    = max(6, int(h_lh * 0.18))
-    b_gap  = max(5, int(b_lh * 0.18))
+    b_gap  = max(5, int(b_lh * 0.16))
     block_h = (
         h_lh * n_hl + gap * n_hl
         + (b_lh * n_bl + b_gap * n_bl + gap if n_bl else 0)
     )
-    text_y = img_h + (band_h - block_h) // 2
+    text_y = bar_top + (bar_h - block_h) // 2
 
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d2      = ImageDraw.Draw(overlay)
-    _draw_text_block(d2, headline, body, h_font, b_font, max_tw, pad_x, text_y, text_rgb, align="left", shadow=False)
+    d = ImageDraw.Draw(overlay)
+    _draw_text_block(d, headline, body, h_font, b_font, max_tw,
+                     pad_x, text_y, (255, 255, 255), align="left", shadow=False)
+    return Image.alpha_composite(canvas, overlay)
+
+
+def _render_clean(img, headline, body, h_font, b_font, placement):
+    """
+    Full-bleed photo, white text placed directly on a naturally dark area.
+    Minimal invisible scrim (only light shadow behind text for legibility).
+    Per brand guidelines: photo untouched — no colour overlay.
+    """
+    from PIL import Image, ImageDraw
+
+    W, H   = img.size
+    canvas = _cover_crop(img.convert("RGBA"), W, H).copy()
+    pad_x  = int(W * 0.07)
+    pad_y  = int(H * 0.06)
+    max_tw = W - pad_x * 2
+
+    tmp    = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
+    h_lh   = _line_h(h_font, tmp)
+    b_lh   = _line_h(b_font, tmp)
+    n_hl   = min(3, len(_wrap(headline.upper(), h_font, max_tw, tmp)))
+    n_bl   = min(2, len(_wrap(body, b_font, max_tw, tmp))) if body else 0
+    gap    = max(8, int(h_lh * 0.20))
+    b_gap  = max(6, int(b_lh * 0.18))
+    block_h = (
+        h_lh * n_hl + gap * n_hl
+        + (b_lh * n_bl + b_gap * n_bl + gap if n_bl else 0)
+    )
+
+    if placement == "top":
+        text_y = pad_y
+    elif placement == "center":
+        text_y = (H - block_h) // 2
+    else:  # bottom
+        text_y = H - block_h - pad_y
+
+    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(overlay)
+    _draw_text_block(d, headline, body, h_font, b_font, max_tw,
+                     pad_x, text_y, (255, 255, 255), align="left", shadow=True)
     return Image.alpha_composite(canvas, overlay)
 
 
 def _render_split(img, headline, body, h_font, b_font, brand_color):
+    """
+    Image right 55%, brand-colour panel left 45%.
+    The colour panel is a pure typography zone — no overlay on the photo itself.
+    Per brand guidelines: colour only where there is no photo behind it.
+    """
     from PIL import Image, ImageDraw
 
     W, H    = img.size
@@ -459,18 +464,24 @@ def _render_split(img, headline, body, h_font, b_font, brand_color):
 
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d2 = ImageDraw.Draw(overlay)
-    _draw_text_block(d2, headline, body, h_font, b_font, max_tw, pad_x, text_y, text_rgb, align="left", shadow=False)
+    _draw_text_block(d2, headline, body, h_font, b_font, max_tw,
+                     pad_x, text_y, text_rgb, align="left", shadow=False)
     return Image.alpha_composite(canvas, overlay)
 
 
 def _render_solid(img, headline, body, h_font, b_font, brand_color):
+    """
+    Typographic card — brand colour background, no photo overlay.
+    Faint 12 % photo texture for depth without obscuring the colour identity.
+    Only use when there is no real photo to show (text-only campaigns).
+    """
     from PIL import Image, ImageDraw
 
     W, H = img.size
     r, g, b = _hex_to_rgb(brand_color)
     canvas = Image.new("RGBA", (W, H), (r, g, b, 255))
 
-    # 12 % photo texture
+    # 12 % photo texture — just enough to hint at depth
     photo = _cover_crop(img.convert("RGBA"), W, H)
     photo.putalpha(30)
     canvas = Image.alpha_composite(canvas, photo)
@@ -534,7 +545,7 @@ def overlay_creative(
             design = _pick_design(image_bytes, anthropic, platform, font_names)
         else:
             design = {
-                "template": "hero", "placement": "center",
+                "template": "bar", "placement": "bottom",
                 "headline_font": font_names[0] if font_names else "",
                 "body_font":     font_names[1] if len(font_names) > 1 else (font_names[0] if font_names else ""),
             }
@@ -559,10 +570,10 @@ def overlay_creative(
         h_font = _pil_font(font_map.get(h_fname), h_size)
         b_font = _pil_font(font_map.get(b_fname), b_size)
 
-        if template == "hero":
-            result = _render_hero(img, headline, body_text, h_font, b_font, color, placement)
-        elif template == "band":
-            result = _render_band(img, headline, body_text, h_font, b_font, color)
+        if template == "bar":
+            result = _render_bar(img, headline, body_text, h_font, b_font)
+        elif template == "clean":
+            result = _render_clean(img, headline, body_text, h_font, b_font, placement)
         elif template == "split":
             result = _render_split(img, headline, body_text, h_font, b_font, color)
         else:

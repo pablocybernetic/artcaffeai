@@ -61,7 +61,7 @@ Image style guidelines:
 - Elements: coffee cups, latte art, food, cozy interiors, or Nairobi lifestyle
 - Colors: warm earth tones, cream, rich browns, soft neutrals
 - NO text, logos, or watermarks in the image (copy is added separately)
-- Size: "1024x1024" for square posts, "1792x1024" for landscape banners, "1024x1792" for stories
+- Size: "1080x1350" for Instagram feed (4:5 portrait — DEFAULT), "1024x1024" for square posts, "1792x1024" for landscape banners, "1024x1792" for stories
 - Describe a real, photographic scene — not illustration or cartoon style\
 """
 
@@ -159,7 +159,12 @@ def _make_image_prompt(
 # Image generation — Ideogram V2
 # ---------------------------------------------------------------------------
 
-_ASPECT_MAP = {"1024x1024": "ASPECT_1_1", "1792x1024": "ASPECT_16_9", "1024x1792": "ASPECT_9_16"}
+_ASPECT_MAP = {
+    "1024x1024": "ASPECT_1_1",
+    "1792x1024": "ASPECT_16_9",
+    "1024x1792": "ASPECT_9_16",
+    "1080x1350": "ASPECT_4_5",   # Instagram 4:5 portrait (guidelines section 9)
+}
 
 
 def _resolve_api_key(key_override: str) -> str:
