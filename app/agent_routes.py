@@ -480,7 +480,7 @@ def analyze_asset_endpoint(req: AnalyzeAssetRequest):
         raise HTTPException(status_code=500, detail=f"Analysis failed: {e}")
 
 
-_NO_PROVIDER_PHRASES = ("not configured", "no image provider")
+_NO_PROVIDER_PHRASES = ("not configured", "no image provider", "no source image", "ai generation is disabled")
 
 
 @router.post("/generate-banner")
@@ -510,11 +510,35 @@ def generate_banner(req: BannerRequest):
                 image_api_key=req.image_api_key,
                 image_provider=req.image_provider,
             )
-            if not assets:
-                raise RuntimeError("No variants were generated")
-            return {"ok": True, "assets": assets, "asset": assets[0], "mode": "variants"}
+            if assets:
+                return {"ok": True, "assets": assets, "asset": assets[0], "mode": "variants"}
+            raise RuntimeError("No variants were generated")
         except RuntimeError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            err_str = str(e)
+            # Fall back to selecting the best existing asset when no provider/photo is available
+            if any(phrase in err_str.lower() for phrase in _NO_PROVIDER_PHRASES):
+                try:
+                    asset = select_best_asset(
+                        sb=sb,
+                        anthropic=anthropic_client,
+                        concept_id=req.concept_id,
+                        content_item_id=req.content_item_id,
+                        headline=req.headline,
+                        caption=req.caption,
+                        platform=req.platform,
+                    )
+                    asset = apply_overlay_to_asset(
+                        sb=sb,
+                        anthropic=anthropic_client,
+                        asset=asset,
+                        headline=req.headline,
+                        concept_id=req.concept_id,
+                        content_item_id=req.content_item_id,
+                    )
+                    return {"ok": True, "asset": asset, "assets": [asset], "mode": "selected"}
+                except RuntimeError as fe:
+                    raise HTTPException(status_code=400, detail=str(fe))
+            raise HTTPException(status_code=400, detail=err_str)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Variant generation failed: {e}")
 

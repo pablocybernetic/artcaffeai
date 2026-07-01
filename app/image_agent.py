@@ -740,6 +740,7 @@ def run_banner_variants(
             else:
                 _resolve_api_key(resolved_key)
 
+        _first_ai_error: Exception | None = None
         for style in _IDEOGRAM_STYLES:
             try:
                 full_prompt_data = _make_full_banner_prompt(
@@ -789,16 +790,22 @@ def run_banner_variants(
                 saved_assets.append({**saved, "_style": style, "_provider": prov})
             except Exception as exc:
                 print(f"[image_agent] variant {style} failed: {exc}", flush=True)
+                if _first_ai_error is None:
+                    _first_ai_error = exc
+
+        if not saved_assets and _first_ai_error is not None:
+            raise RuntimeError(f"All AI variants failed: {_first_ai_error}") from _first_ai_error
 
     else:
         # ── Overlay-only path: 3 PIL templates on existing photo ──────────────
         if not source_url:
             raise RuntimeError(
-                "No source image found and Ideogram is disabled. "
-                "Upload a product photo to the content item or enable Ideogram in Settings."
+                "No source image found and AI generation is disabled. "
+                "Upload a product photo to the content item or enable AI image generation in Settings."
             )
         source_bytes = _download_image_url(source_url)
 
+        _first_overlay_error: Exception | None = None
         for tmpl in _VARIANT_TEMPLATES:
             try:
                 variant_bytes = overlay_creative(
@@ -828,6 +835,11 @@ def run_banner_variants(
                 print(f"[image_agent] overlay variant {tmpl} uploaded", flush=True)
             except Exception as exc:
                 print(f"[image_agent] overlay variant {tmpl} failed: {exc}", flush=True)
+                if _first_overlay_error is None:
+                    _first_overlay_error = exc
+
+        if not saved_assets and _first_overlay_error is not None:
+            raise RuntimeError(f"All overlay variants failed: {_first_overlay_error}") from _first_overlay_error
 
     # 5. Attach all variants to content item in one update
     if content_item_id and saved_assets:
