@@ -381,19 +381,41 @@ def run_image_generation(
 
     print(f"[image_agent] prompt='{image_prompt[:120]}…' size={size}", flush=True)
 
-    # 3. Source image — use ideation photo directly (no Ideogram remix needed:
-    #    product shots are already professional quality; remix only distorts them).
-    #    Only call Ideogram when there is no existing photo to work from.
+    # 3. Source image resolution:
+    #    - API key present + ideation photo → Ideogram remix (photo + prompt → enhanced image)
+    #    - API key present + no photo       → Ideogram text-to-image
+    #    - No API key + ideation photo      → use photo directly (overlay only, no Ideogram)
+    #    - No API key + no photo            → raises (caught upstream → select_best_asset fallback)
     source_url = _get_ideation_asset_url(sb, content_item_id) if content_item_id else None
+    resolved_key = (image_api_key or "").strip()
 
-    if source_url:
+    if source_url and resolved_key:
+        source_bytes = _download_image_url(source_url)
+        remix_prompt = _make_remix_prompt(
+            anthropic,
+            brand_context=brand_context,
+            headline=headline,
+            caption=caption,
+            platform=platform,
+            brand_assets_ctx=brand_assets_text,
+        )
+        image_bytes = _remix_ideogram(
+            source_bytes,
+            remix_prompt.get("prompt", image_prompt),
+            remix_prompt.get("negative_prompt", negative_prompt),
+            remix_prompt.get("size", size),
+            resolved_key,
+        )
+        provider = "ideogram-remix"
+        print(f"[image_agent] Ideogram remix complete ({len(image_bytes)//1024} KB)", flush=True)
+    elif source_url:
         source_bytes = _download_image_url(source_url)
         image_bytes  = source_bytes
         provider     = "ideation-asset"
         print(f"[image_agent] using ideation asset directly ({len(image_bytes)//1024} KB)", flush=True)
     else:
-        _resolve_api_key(image_api_key)   # raises early if key missing
-        image_bytes, provider = _generate_image(image_prompt, negative_prompt, size, image_api_key)
+        _resolve_api_key(resolved_key)   # raises early if key missing
+        image_bytes, provider = _generate_image(image_prompt, negative_prompt, size, resolved_key)
 
     # 3b. Composite headline + body copy using brand fonts and colour
     brand_color = _extract_brand_color(brand_context)
@@ -495,15 +517,37 @@ def run_banner_variants(
     if not image_prompt:
         raise RuntimeError("Claude returned an empty image prompt")
 
-    # 3. Get source image once — reuse for all 3 variants
-    source_url = _get_ideation_asset_url(sb, content_item_id) if content_item_id else None
-    if source_url:
+    # 3. Get source image once — reuse for all 3 variant overlays
+    #    Same logic as run_image_generation: key + photo → remix; key only → generate; no key → raw photo
+    source_url   = _get_ideation_asset_url(sb, content_item_id) if content_item_id else None
+    resolved_key = (image_api_key or "").strip()
+
+    if source_url and resolved_key:
+        raw_bytes = _download_image_url(source_url)
+        remix_prompt = _make_remix_prompt(
+            anthropic,
+            brand_context=brand_context,
+            headline=headline,
+            caption=caption,
+            platform=platform,
+            brand_assets_ctx=brand_assets_text,
+        )
+        source_bytes = _remix_ideogram(
+            raw_bytes,
+            remix_prompt.get("prompt", image_prompt),
+            remix_prompt.get("negative_prompt", negative_prompt),
+            remix_prompt.get("size", size),
+            resolved_key,
+        )
+        provider = "ideogram-remix"
+        print(f"[image_agent] variants — Ideogram remix ({len(source_bytes)//1024} KB)", flush=True)
+    elif source_url:
         source_bytes = _download_image_url(source_url)
         provider = "ideation-asset"
         print(f"[image_agent] variants — using ideation asset ({len(source_bytes)//1024} KB)", flush=True)
     else:
-        _resolve_api_key(image_api_key)
-        source_bytes, provider = _generate_image(image_prompt, negative_prompt, size, image_api_key)
+        _resolve_api_key(resolved_key)
+        source_bytes, provider = _generate_image(image_prompt, negative_prompt, size, resolved_key)
         print(f"[image_agent] variants — generated source ({len(source_bytes)//1024} KB)", flush=True)
 
     brand_color = _extract_brand_color(brand_context)
