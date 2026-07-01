@@ -237,15 +237,33 @@ Artcaffe Image Guidelines 2026 — MUST FOLLOW:
 
 Look at this product photo and design the text overlay. Choose ONE template:
 
-LAYOUT TEMPLATES:
-  bar   — full-bleed photo + narrow dark bar (28% height) at BOTTOM, white text
-          → DEFAULT: use when photo is busy or subject fills the whole frame
-  clean — full-bleed photo, white text placed on an already-dark area of the image
-          → only if photo has a naturally dark corner/zone with no important subject
-  split — brand-colour panel left 45%, image right 55%
-          → best for portrait/story format where a typographic panel makes sense
-  solid — brand colour background, faint image texture, no photo overlay
-          → only when image quality is very low or campaign is purely typographic
+LAYOUT TEMPLATES — pick based on image type and visual composition:
+
+  bar   — full-bleed photo + narrow dark bar (25% height), white text in bar
+          → USE FOR: busy close-up food shots, complex textured backgrounds,
+            dramatic shots where the subject fills the whole frame, dark-tone photography
+          → AVOID FOR: clean product-on-white or neutral-background photos
+
+  clean — full-bleed photo, white text placed on an already-dark area of the photo
+          → USE FOR: moody/atmospheric photography with a genuinely dark corner or zone,
+            low-key lighting, dark backgrounds
+          → REQUIRES a naturally dark area — do NOT use on white or bright backgrounds
+
+  split — solid colour panel (40%) on one side, photo on the other
+          → USE FOR: product-on-white shots, clean flat-lays, minimalist photography,
+            any time you want a strong brand identity zone alongside the product
+          → Works at ANY aspect ratio — not limited to portrait
+
+  solid — full brand-colour background, photo at 12% texture opacity
+          → USE FOR: clean product shots on white/neutral backgrounds, bold announcement
+            posts, when the brand colour should dominate the visual
+          → Especially effective for food-on-white and simple product photography
+
+SELECTION GUIDE (follow strictly):
+  - Product or food on WHITE or NEUTRAL background → "solid" or "split" (not bar)
+  - Food filling the frame with complex/dark background → "bar"
+  - Photo with a genuine dark zone and no subject in it → "clean"
+  - When torn between bar and split → choose "split"
 
 PLACEMENT (clean template only): top / center / bottom
   → where in the photo the naturally dark zone is
@@ -253,8 +271,8 @@ PLACEMENT (clean template only): top / center / bottom
 SUBJECT LOCATION — where is the main food or product in this photo?
   subject_zone: top / center / bottom
 
-BAR POSITION — for the bar template, place the dark bar on the OPPOSITE side from the subject.
-  bar_position: bottom (subject is top or center — DEFAULT) / top (subject is at the bottom)
+BAR POSITION — for the bar template only, place the bar on the OPPOSITE side from the subject.
+  bar_position: bottom (subject is top or center) / top (subject is at the bottom)
 
 AVAILABLE FONTS (use EXACT filenames):
 {fonts_list}
@@ -482,14 +500,21 @@ def _cover_crop(img: "Image.Image", target_w: int, target_h: int) -> "Image.Imag
 
 # ── Template renderers ───────────────────────────────────────────────────────
 
-def _render_bar(img, headline, body, h_font, b_font, bar_position: str = "bottom"):
+def _render_bar(img, headline, body, h_font, b_font, bar_position: str = "bottom", accent_color: str | None = None):
     """
-    Full-bleed photo + narrow dark bar (28 % height, ~66 % black opacity).
-    bar_position='bottom' — bar at bottom (subject is top/center, DEFAULT).
-    bar_position='top'    — bar at top (subject is at the bottom of frame).
-    Per brand guidelines: dark overlay bar only — never brand-colour tint over photo.
+    Full-bleed photo + narrow bar (25-28% height).
+    accent_color: optional hex for a branded/Pantone bar; None → near-black.
+    bar_position: 'bottom' (default) or 'top'.
+    Per brand guidelines: no full brand-colour tint over photo — bar only.
     """
     from PIL import Image, ImageDraw
+
+    if accent_color:
+        br, bg, bb = _hex_to_rgb(accent_color)
+        solid_alpha = 230
+    else:
+        br, bg, bb = 0, 0, 0
+        solid_alpha = 168
 
     W, H   = img.size
     canvas = _cover_crop(img.convert("RGBA"), W, H).copy()
@@ -502,23 +527,21 @@ def _render_bar(img, headline, body, h_font, b_font, bar_position: str = "bottom
     bd  = ImageDraw.Draw(bar)
 
     if bar_position == "top":
-        # Solid zone at top, fade fades out downward
-        bd.rectangle([(0, 0), (W, bar_h)], fill=(0, 0, 0, 168))
+        bd.rectangle([(0, 0), (W, bar_h)], fill=(br, bg, bb, solid_alpha))
         for i in range(fade_h):
-            alpha = int(168 * ((fade_h - i) / fade_h) ** 1.6)
+            alpha = int(solid_alpha * ((fade_h - i) / fade_h) ** 1.6)
             y = bar_h + i
             if 0 <= y < H:
-                bd.line([(0, y), (W, y)], fill=(0, 0, 0, alpha))
+                bd.line([(0, y), (W, y)], fill=(br, bg, bb, alpha))
         bar_solid_y = 0
     else:
-        # Solid zone at bottom, fade fades in upward (default)
         bar_solid_y = H - bar_h
         for i in range(fade_h):
-            alpha = int(168 * (i / fade_h) ** 1.6)
+            alpha = int(solid_alpha * (i / fade_h) ** 1.6)
             y = bar_solid_y - fade_h + i
             if 0 <= y < H:
-                bd.line([(0, y), (W, y)], fill=(0, 0, 0, alpha))
-        bd.rectangle([(0, bar_solid_y), (W, H)], fill=(0, 0, 0, 168))
+                bd.line([(0, y), (W, y)], fill=(br, bg, bb, alpha))
+        bd.rectangle([(0, bar_solid_y), (W, H)], fill=(br, bg, bb, solid_alpha))
 
     canvas = Image.alpha_composite(canvas, bar)
 
@@ -678,9 +701,11 @@ def overlay_creative(
     brand_color: str = "",
     anthropic: Any = None,
     platform: str = "instagram",
+    template_override: str = "",
 ) -> bytes:
     """
     Composite headline + body copy onto the image using a Claude-chosen layout template.
+    template_override: force a specific template ("bar"|"clean"|"split"|"solid") and skip Claude.
     Returns composited PNG bytes.  On any error returns original bytes unchanged.
     """
     try:
@@ -701,21 +726,41 @@ def overlay_creative(
         # Layer 1 — fast PIL brightness analysis (always runs, no API cost)
         zones = _brightness_zones(image_bytes)
 
-        # Layer 2 — Claude vision (when available); overrides brightness heuristic
-        if anthropic and font_names:
+        _HEADLINE_REQUIRED = ["Gotham-Medium.otf", "Gotham-Bold.otf"]
+        default_h = font_names[0] if font_names else ""
+        default_b = font_names[1] if len(font_names) > 1 else default_h
+        approved_h = next((f for f in _HEADLINE_REQUIRED if f in font_names), default_h)
+        approved_b = next((f for f in font_names if f != approved_h), default_b)
+
+        if template_override and template_override in ("bar", "clean", "split", "solid"):
+            # Forced template — skip Claude entirely
+            design = {
+                "template":      template_override,
+                "placement":     zones["placement"],
+                "subject_zone":  zones["subject_zone"],
+                "bar_position":  zones["bar_position"],
+                "headline_font": approved_h,
+                "body_font":     approved_b,
+                "palette_name":  "",
+                "palette_color": None,
+            }
+            print(f"[image_overlay] forced template={template_override}", flush=True)
+        elif anthropic and font_names:
+            # Layer 2 — Claude vision; overrides brightness heuristic
             design = _pick_design(image_bytes, anthropic, platform, font_names)
-            # Fill any fields Claude didn't return with brightness-analysis values
             design.setdefault("bar_position", zones["bar_position"])
             design.setdefault("subject_zone", zones["subject_zone"])
             design.setdefault("placement",    zones["placement"])
         else:
             design = {
-                "template":     "bar",
-                "placement":    zones["placement"],
-                "subject_zone": zones["subject_zone"],
-                "bar_position": zones["bar_position"],
-                "headline_font": font_names[0] if font_names else "",
-                "body_font":    font_names[1] if len(font_names) > 1 else (font_names[0] if font_names else ""),
+                "template":      "bar",
+                "placement":     zones["placement"],
+                "subject_zone":  zones["subject_zone"],
+                "bar_position":  zones["bar_position"],
+                "headline_font": approved_h,
+                "body_font":     approved_b,
+                "palette_name":  "",
+                "palette_color": None,
             }
 
         template      = design["template"]
@@ -743,7 +788,13 @@ def overlay_creative(
         b_font = _pil_font(font_map.get(b_fname), b_size)
 
         if template == "bar":
-            result = _render_bar(img, headline, body_text, h_font, b_font, bar_position)
+            # Use Pantone palette color for the bar when it's dark (luminance < 80)
+            bar_accent = None
+            if palette_color:
+                pr, pg, pb = _hex_to_rgb(palette_color)
+                if _luminance(pr, pg, pb) < 80:
+                    bar_accent = palette_color
+            result = _render_bar(img, headline, body_text, h_font, b_font, bar_position, bar_accent)
         elif template == "clean":
             result = _render_clean(img, headline, body_text, h_font, b_font, placement)
         elif template == "split":

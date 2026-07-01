@@ -25,7 +25,7 @@ from supabase import Client, create_client
 import os
 
 from job_runner import run_job
-from image_agent import run_image_generation, select_best_asset, apply_overlay_to_asset
+from image_agent import run_image_generation, run_banner_variants, select_best_asset, apply_overlay_to_asset
 from image_analysis_agent import analyze_asset as _analyze_asset
 from video_agent import run_video_generation
 
@@ -89,6 +89,7 @@ class BannerRequest(BaseModel):
     caption: str
     platform: str = "instagram"
     image_api_key: str = ""       # Ideogram key from frontend Settings — overrides env var
+    generate_variants: bool = False  # when True: generate bar + split + solid variants
 
 
 class AnalyzeAssetRequest(BaseModel):
@@ -493,6 +494,27 @@ def generate_banner(req: BannerRequest):
     from anthropic import Anthropic  # noqa: PLC0415
 
     anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+
+    # Multi-variant path: generate bar + split + solid from the same source image
+    if req.generate_variants:
+        try:
+            assets = run_banner_variants(
+                sb=sb,
+                anthropic=anthropic_client,
+                concept_id=req.concept_id,
+                content_item_id=req.content_item_id,
+                headline=req.headline,
+                caption=req.caption,
+                platform=req.platform,
+                image_api_key=req.image_api_key,
+            )
+            if not assets:
+                raise RuntimeError("No variants were generated")
+            return {"ok": True, "assets": assets, "asset": assets[0], "mode": "variants"}
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Variant generation failed: {e}")
 
     # Try to generate a brand-new image first.
     try:

@@ -446,6 +446,124 @@ def run_image_generation(
 
 
 # ---------------------------------------------------------------------------
+# Multi-variant generation — 3 templates from the same source image
+# ---------------------------------------------------------------------------
+
+_VARIANT_TEMPLATES = ["bar", "split", "solid"]
+
+
+def run_banner_variants(
+    *,
+    sb: Client,
+    anthropic: Any,
+    concept_id: str,
+    content_item_id: str | None,
+    headline: str,
+    caption: str,
+    platform: str = "instagram",
+    image_api_key: str = "",
+) -> list[dict]:
+    """
+    Generate 3 banner variants (bar / split / solid) from the same source image.
+    The source image is fetched/generated only once, then 3 different overlays are applied.
+    All variants are uploaded and attached to content_item_id.
+    Returns a list of asset dicts (up to 3).
+    """
+    # 1. Brand context
+    ctx = get_active(sb, concept_id)
+    if not ctx:
+        raise RuntimeError(f"No active brand context for concept_id={concept_id}")
+    brand_context = ctx.get("context_json") or ctx
+
+    # 1b. Brand assets context
+    assets_ctx = load_brand_assets_context(sb, anthropic)
+    brand_assets_text = format_for_image_prompt(assets_ctx)
+
+    # 2. Generate image prompt
+    prompt_data = _make_image_prompt(
+        anthropic,
+        brand_context=brand_context,
+        headline=headline,
+        caption=caption,
+        platform=platform,
+        brand_assets_ctx=brand_assets_text,
+    )
+    image_prompt = prompt_data.get("prompt", "").strip()
+    negative_prompt = prompt_data.get("negative_prompt", "")
+    size = prompt_data.get("size", "1024x1024")
+
+    if not image_prompt:
+        raise RuntimeError("Claude returned an empty image prompt")
+
+    # 3. Get source image once — reuse for all 3 variants
+    source_url = _get_ideation_asset_url(sb, content_item_id) if content_item_id else None
+    if source_url:
+        source_bytes = _download_image_url(source_url)
+        provider = "ideation-asset"
+        print(f"[image_agent] variants — using ideation asset ({len(source_bytes)//1024} KB)", flush=True)
+    else:
+        _resolve_api_key(image_api_key)
+        source_bytes, provider = _generate_image(image_prompt, negative_prompt, size, image_api_key)
+        print(f"[image_agent] variants — generated source ({len(source_bytes)//1024} KB)", flush=True)
+
+    brand_color = _extract_brand_color(brand_context)
+
+    # 4. Apply each template overlay
+    saved_assets: list[dict] = []
+    for tmpl in _VARIANT_TEMPLATES:
+        try:
+            variant_bytes = overlay_creative(
+                source_bytes, headline, sb,
+                body_text=caption,
+                brand_color=brand_color,
+                anthropic=anthropic,
+                platform=platform,
+                template_override=tmpl,
+            )
+            bucket, storage_path, public_url = _upload_to_storage(sb, variant_bytes, concept_id)
+            filename = storage_path.split("/")[-1]
+            asset_row: dict = {
+                "concept_id":   concept_id,
+                "filename":     filename,
+                "storage_path": storage_path,
+                "mime_type":    "image/png",
+                "asset_type":   "image",
+                "generator":    "artcaffe-ai",
+                "platform":     platform,
+                "public_url":   public_url,
+                "created_at":   _now(),
+            }
+            insert_res = sb.table("assets").insert(asset_row).execute()
+            saved = insert_res.data[0] if insert_res.data else asset_row
+            saved_assets.append({**saved, "_template": tmpl, "_provider": provider})
+            print(f"[image_agent] variant {tmpl} uploaded → {public_url[:60]}…", flush=True)
+        except Exception as exc:
+            print(f"[image_agent] variant {tmpl} failed: {exc}", flush=True)
+
+    # 5. Attach all variants to content item in one update
+    if content_item_id and saved_assets:
+        try:
+            item_res = (
+                sb.table("content_items")
+                .select("asset_ids")
+                .eq("id", content_item_id)
+                .single()
+                .execute()
+            )
+            if item_res.data:
+                existing = item_res.data.get("asset_ids") or []
+                new_ids = [a["id"] for a in saved_assets if a.get("id")]
+                sb.table("content_items").update({
+                    "asset_ids": list({*existing, *new_ids}),
+                    "updated_at": _now(),
+                }).eq("id", content_item_id).execute()
+        except Exception as exc:
+            print(f"[image_agent] attach variants to item failed: {exc}", flush=True)
+
+    return saved_assets
+
+
+# ---------------------------------------------------------------------------
 # Fallback: select best existing asset when no image provider is configured
 # ---------------------------------------------------------------------------
 SELECT_SYSTEM = """\
