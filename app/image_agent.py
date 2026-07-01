@@ -32,6 +32,7 @@ from supabase import Client
 
 from brand_context import get_active
 from image_overlay import overlay_creative
+from brand_assets_context import format_for_image_prompt, load_brand_assets_context
 
 # ---------------------------------------------------------------------------
 # Config
@@ -95,15 +96,20 @@ def _make_remix_prompt(
     headline: str,
     caption: str,
     platform: str,
+    brand_assets_ctx: str = "",
 ) -> dict:
     """Ask Claude to write an enhancement-only prompt (does not change the food subject)."""
-    user_msg = (
-        "BRAND CONTEXT:\n" + json.dumps(brand_context, indent=2) + "\n\n"
-        f"HEADLINE: {headline}\n"
-        f"CAPTION: {caption}\n"
-        f"PLATFORM: {platform}\n\n"
-        "Write a photographic enhancement prompt. Preserve the exact food subject in the source image."
-    )
+    parts = [
+        "BRAND CONTEXT:\n" + json.dumps(brand_context, indent=2),
+        "",
+        f"HEADLINE: {headline}",
+        f"CAPTION: {caption}",
+        f"PLATFORM: {platform}",
+    ]
+    if brand_assets_ctx:
+        parts += ["", brand_assets_ctx]
+    parts += ["", "Write a photographic enhancement prompt. Preserve the exact food subject in the source image."]
+    user_msg = "\n".join(parts)
     resp = anthropic.messages.create(
         model=MODEL,
         max_tokens=400,
@@ -135,15 +141,20 @@ def _make_image_prompt(
     headline: str,
     caption: str,
     platform: str,
+    brand_assets_ctx: str = "",
 ) -> dict:
     """Ask Claude to write a detailed image generation prompt."""
-    user_msg = (
-        "BRAND CONTEXT:\n" + json.dumps(brand_context, indent=2) + "\n\n"
-        f"HEADLINE: {headline}\n"
-        f"CAPTION: {caption}\n"
-        f"PLATFORM: {platform}\n\n"
-        "Write the image prompt for a marketing banner that fits this content."
-    )
+    parts = [
+        "BRAND CONTEXT:\n" + json.dumps(brand_context, indent=2),
+        "",
+        f"HEADLINE: {headline}",
+        f"CAPTION: {caption}",
+        f"PLATFORM: {platform}",
+    ]
+    if brand_assets_ctx:
+        parts += ["", brand_assets_ctx]
+    parts += ["", "Write the image prompt for a marketing banner that fits this content."]
+    user_msg = "\n".join(parts)
     resp = anthropic.messages.create(
         model=MODEL,
         max_tokens=500,
@@ -348,6 +359,10 @@ def run_image_generation(
         raise RuntimeError(f"No active brand context for concept_id={concept_id}")
     brand_context = ctx.get("context_json") or ctx
 
+    # 1b. Brand assets context (logos + image guidelines extracted from uploaded PDFs)
+    assets_ctx = load_brand_assets_context(sb, anthropic)
+    brand_assets_text = format_for_image_prompt(assets_ctx)
+
     # 2. Generate image prompt via Claude
     prompt_data = _make_image_prompt(
         anthropic,
@@ -355,6 +370,7 @@ def run_image_generation(
         headline=headline,
         caption=caption,
         platform=platform,
+        brand_assets_ctx=brand_assets_text,
     )
     image_prompt = prompt_data.get("prompt", "").strip()
     negative_prompt = prompt_data.get("negative_prompt", "")

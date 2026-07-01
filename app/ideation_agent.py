@@ -22,6 +22,7 @@ from typing import Any
 
 from supabase import Client
 from brand_context import get_active
+from brand_assets_context import format_for_ideation, load_brand_assets_context
 
 MODEL = "claude-haiku-4-5-20251001"
 
@@ -166,6 +167,10 @@ def run_ideation(
     # 3. Fetch assets
     assets = _fetch_assets(sb, concept_id)
 
+    # 3b. Brand assets context (logos + guidelines extracted from uploaded PDFs)
+    assets_ctx = load_brand_assets_context(sb, anthropic)
+    brand_assets_block = format_for_ideation(assets_ctx)
+
     # 4. Build prompt
     brief_text = (
         brief.get("agent_brief")
@@ -183,6 +188,9 @@ def run_ideation(
         "",
         f"TARGET PLATFORM: {platform}",
     ]
+
+    if brand_assets_block:
+        user_parts += ["", brand_assets_block]
 
     if brief.get("research_summary"):
         user_parts += ["", f"RESEARCH SUMMARY:\n{brief['research_summary']}"]

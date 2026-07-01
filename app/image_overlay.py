@@ -36,6 +36,7 @@ import re
 from typing import Any, Optional
 
 from supabase import Client
+from pantone_2026 import all_hex_colors, palette_prompt_block
 
 FONTS_BUCKET   = os.environ.get("FONTS_BUCKET", "fonts")
 _LAYOUT_MODEL  = "claude-haiku-4-5-20251001"
@@ -208,8 +209,10 @@ def _pick_design(
       - placement     — for clean template, where the dark zone is (top / center / bottom)
       - headline_font — one of the uploaded font filenames
       - body_font     — a DIFFERENT uploaded font filename
+      - palette_name  — one of the Pantone 2026 palette names
+      - palette_color — one hex value from that palette (for split/solid backgrounds)
 
-    Returns dict with those six keys. Falls back to safe defaults if call fails.
+    Returns dict with those eight keys. Falls back to safe defaults if call fails.
     """
     # Safe defaults (use first two fonts available, or same font twice)
     default_h = font_names[0] if font_names else ""
@@ -224,6 +227,7 @@ def _pick_design(
         b64 = base64.standard_b64encode(buf.getvalue()).decode()
 
         fonts_list = "\n".join(f"  - {n}" for n in font_names)
+        palette_block = palette_prompt_block()
 
         prompt = f"""You are a brand designer creating a {platform} marketing creative for Artcaffe Coffee & Restaurant.
 
@@ -261,12 +265,22 @@ Rules:
 - body_font must be a DIFFERENT file from headline_font
 - Good body font choices: Gotham-Book.otf, Gotham-Light.otf, Lovelo_Line_Light.otf
 
+{palette_block}
+
+ACCENT COLOUR RULES:
+- palette_name: pick the palette whose mood best matches the photo's food/drink subject and lighting
+- palette_color: pick ONE hex from that palette — choose a colour that complements the photo
+  → For DARK photos (evening, moody): prefer darker shades from Glamour & Gleam or Light & Shadow
+  → For BRIGHT, WARM photos (coffee, pastries): prefer Take a Break or Comfort Zone
+  → For FRESH, VIVID photos (cocktails, fruit): prefer Tropic Tonalities
+  → Only split/solid templates use palette_color; bar/clean ignore it
+
 Reply ONLY with valid JSON (no markdown, no explanation):
-{{"template":"bar","placement":"bottom","subject_zone":"center","bar_position":"bottom","headline_font":"Gotham-Medium.otf","body_font":"Gotham-Light.otf"}}"""
+{{"template":"bar","placement":"bottom","subject_zone":"center","bar_position":"bottom","headline_font":"Gotham-Medium.otf","body_font":"Gotham-Light.otf","palette_name":"Take a Break","palette_color":"#B8916E"}}"""
 
         resp = anthropic.messages.create(
             model=_LAYOUT_MODEL,
-            max_tokens=120,
+            max_tokens=180,
             messages=[{
                 "role": "user",
                 "content": [
@@ -305,18 +319,27 @@ Reply ONLY with valid JSON (no markdown, no explanation):
         if h_font == b_font and len(font_names) > 1:
             b_font = next((f for f in font_names if f != h_font), b_font)
 
+        # Palette colour — validate it's a known 2026 hex; else None (caller falls back to brand colour)
+        raw_palette_color = result.get("palette_color", "")
+        valid_hexes = set(all_hex_colors())
+        palette_color = raw_palette_color if raw_palette_color in valid_hexes else None
+        palette_name  = result.get("palette_name", "")
+
         print(
             f"[image_overlay] design: template={template} subject={subject_zone} "
-            f"bar={bar_position} placement={placement} h={h_font} b={b_font}",
+            f"bar={bar_position} placement={placement} h={h_font} b={b_font} "
+            f"palette={palette_name} accent={palette_color}",
             flush=True,
         )
         return {
-            "template":     template,
-            "placement":    placement,
-            "subject_zone": subject_zone,
-            "bar_position": bar_position,
+            "template":      template,
+            "placement":     placement,
+            "subject_zone":  subject_zone,
+            "bar_position":  bar_position,
             "headline_font": h_font,
-            "body_font":    b_font,
+            "body_font":     b_font,
+            "palette_name":  palette_name,
+            "palette_color": palette_color,
         }
 
     except Exception as exc:
@@ -325,12 +348,14 @@ Reply ONLY with valid JSON (no markdown, no explanation):
         fallback_h = next((f for f in _HEADLINE_REQUIRED if f in font_names), default_h)
         fallback_b = next((f for f in font_names if f != fallback_h), default_b)
         return {
-            "template":     "bar",
-            "placement":    "bottom",
-            "subject_zone": "center",
-            "bar_position": "bottom",
+            "template":      "bar",
+            "placement":     "bottom",
+            "subject_zone":  "center",
+            "bar_position":  "bottom",
             "headline_font": fallback_h,
-            "body_font":    fallback_b,
+            "body_font":     fallback_b,
+            "palette_name":  "",
+            "palette_color": None,
         }
 
 
@@ -693,11 +718,14 @@ def overlay_creative(
                 "body_font":    font_names[1] if len(font_names) > 1 else (font_names[0] if font_names else ""),
             }
 
-        template     = design["template"]
-        placement    = design["placement"]
-        bar_position = design["bar_position"]
-        h_fname      = design["headline_font"]
-        b_fname      = design["body_font"]
+        template      = design["template"]
+        placement     = design["placement"]
+        bar_position  = design["bar_position"]
+        h_fname       = design["headline_font"]
+        b_fname       = design["body_font"]
+        # Pantone 2026 palette accent — overrides static brand colour on split/solid
+        palette_color = design.get("palette_color")
+        accent_color  = palette_color if palette_color else color
 
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         W, H = img.size
@@ -719,16 +747,18 @@ def overlay_creative(
         elif template == "clean":
             result = _render_clean(img, headline, body_text, h_font, b_font, placement)
         elif template == "split":
-            result = _render_split(img, headline, body_text, h_font, b_font, color)
+            result = _render_split(img, headline, body_text, h_font, b_font, accent_color)
         else:
-            result = _render_solid(img, headline, body_text, h_font, b_font, color)
+            result = _render_solid(img, headline, body_text, h_font, b_font, accent_color)
 
         buf = io.BytesIO()
         result.convert("RGB").save(buf, format="PNG", optimize=True)
         data = buf.getvalue()
+        palette_name = design.get("palette_name", "")
         print(
             f"[image_overlay] {template} bar={bar_position} placement={placement} "
-            f"h={h_fname} b={b_fname} — {len(data)//1024} KB",
+            f"h={h_fname} b={b_fname} palette={palette_name!r} accent={accent_color} "
+            f"— {len(data)//1024} KB",
             flush=True,
         )
         return data

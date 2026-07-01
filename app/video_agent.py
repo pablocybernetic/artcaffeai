@@ -30,6 +30,7 @@ import httpx
 from supabase import Client
 
 from brand_context import get_active
+from brand_assets_context import format_for_video_prompt, load_brand_assets_context
 
 # ---------------------------------------------------------------------------
 # Config
@@ -138,6 +139,7 @@ def _make_motion_prompt(
     platform: str,
     brand_context: dict,
     image_metadata: Optional[dict] = None,
+    brand_assets_ctx: str = "",
 ) -> dict:
     parts: list[str] = [
         "BRAND CONTEXT:\n" + json.dumps(brand_context, indent=2),
@@ -150,6 +152,9 @@ def _make_motion_prompt(
     meta_section = _build_image_metadata_section(image_metadata or {})
     if meta_section:
         parts += ["", meta_section]
+
+    if brand_assets_ctx:
+        parts += ["", brand_assets_ctx]
 
     parts += ["", "Write the Runway motion prompt for this marketing video."]
     user_msg = "\n".join(parts)
@@ -326,6 +331,10 @@ def run_video_generation(
         raise RuntimeError(f"No active brand context for concept_id={concept_id}")
     brand_context = ctx.get("context_json") or ctx
 
+    # 1b. Brand assets context (video guidelines extracted from uploaded PDFs)
+    assets_ctx = load_brand_assets_context(sb, anthropic)
+    brand_assets_text = format_for_video_prompt(assets_ctx)
+
     # 2. Resolve source image + metadata
     source_url = image_url.strip()
     image_metadata: Optional[dict] = None
@@ -348,7 +357,7 @@ def run_video_generation(
 
     print(f"[video_agent] source image: {source_url[:80]}…", flush=True)
 
-    # 3. Generate motion prompt via Claude — enriched with image metadata
+    # 3. Generate motion prompt via Claude — enriched with image metadata + brand guidelines
     prompt_data = _make_motion_prompt(
         anthropic,
         headline=headline,
@@ -356,6 +365,7 @@ def run_video_generation(
         platform=platform,
         brand_context=brand_context,
         image_metadata=image_metadata,
+        brand_assets_ctx=brand_assets_text,
     )
     motion_prompt = prompt_data.get("motion_prompt", "Slow cinematic push, warm ambient café light, gentle steam rising from coffee.")
     duration = int(prompt_data.get("duration", 5))
