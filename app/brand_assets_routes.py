@@ -29,6 +29,8 @@ Supabase migration (run once in the SQL editor):
 from __future__ import annotations
 
 import os
+import re
+import unicodedata
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, UploadFile, File
@@ -77,6 +79,26 @@ def require_api_key(x_api_key: Optional[str] = Header(None)) -> None:
 def _validate_category(category: str) -> None:
     if category not in CATEGORIES:
         raise HTTPException(400, f"Unknown category '{category}'. Use: {', '.join(sorted(CATEGORIES))}")
+
+
+def _sanitize_filename(name: str) -> str:
+    """
+    Make a filename safe for Supabase Storage keys.
+    Supabase only allows ASCII alphanumeric, hyphens, underscores, dots, and slashes.
+    Steps: Unicode NFKD → strip non-ASCII → replace unsafe chars → collapse underscores.
+    """
+    # Decompose accented chars (ü → u + combining diaeresis), then drop non-ASCII
+    name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    # Split into stem + extension to protect the dot
+    if "." in name:
+        stem, ext = name.rsplit(".", 1)
+        ext = re.sub(r"[^\w]", "", ext)  # extension: alphanumeric only
+    else:
+        stem, ext = name, ""
+    # Stem: allow alphanumeric, hyphens, underscores; replace everything else
+    stem = re.sub(r"[^\w\-]", "_", stem)
+    stem = re.sub(r"_+", "_", stem).strip("_") or "file"
+    return f"{stem}.{ext}" if ext else stem
 
 
 def _storage_path(category: str, filename: str) -> str:
@@ -182,7 +204,7 @@ async def upload_asset(
     """Upload a brand asset file and create an empty metadata record."""
     _validate_category(category)
 
-    name = (file.filename or "file").replace(" ", "_")
+    name = _sanitize_filename(file.filename or "file")
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
 
     allowed = ALLOWED_BY_CATEGORY[category]
