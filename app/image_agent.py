@@ -88,6 +88,39 @@ Rules:
 - Size: "1024x1024" for square posts, "1792x1024" for landscape, "1024x1792" for stories\
 """
 
+FULL_BANNER_SYSTEM = """\
+You are a senior art director at an AI-native creative studio producing complete marketing banners
+for Artcaffe Coffee & Restaurant — a premium café brand in Nairobi, Kenya.
+
+The AI image generator (Ideogram) will render the ENTIRE finished banner including the text.
+Your job: write a single, highly detailed prompt that describes both the visual scene AND the
+exact typography — so Ideogram renders the headline and caption directly in the image.
+
+Output ONLY a JSON object — no markdown, no prose:
+{
+  "prompt": "complete banner description with typography instructions",
+  "negative_prompt": "what to avoid",
+  "size": "1080x1350"
+}
+
+Typography rules (Ideogram renders text, so be precise):
+- Always quote the exact headline: with the text "HEADLINE HERE" in [weight] [colour] typography
+- Describe placement: at the bottom / centered / upper third
+- Describe type style: bold white sans-serif / elegant serif / heavy condensed uppercase
+- Add the caption in smaller text below the headline if space allows
+
+Visual style rules:
+- Mood: warm, premium, aspirational — not generic stock photo
+- Artcaffe colours: forest green (#1B3A2A), cream (#F5EBD5), warm blacks
+- NO Artcaffe logo or wordmark (add separately)
+- Size: "1080x1350" for Instagram 4:5 (DEFAULT), "1024x1792" for stories, "1024x1024" for square
+
+Style variants (caller passes style_hint — follow exactly):
+  editorial  → clean white space, minimal composition, typographic hierarchy, sans-serif
+  lifestyle  → atmospheric depth, soft bokeh, warm tones, text integrated naturally into scene
+  bold       → high contrast, punchy, oversized headline dominates, graphic impact\
+"""
+
 
 def _make_remix_prompt(
     anthropic: Any,
@@ -114,6 +147,48 @@ def _make_remix_prompt(
         model=MODEL,
         max_tokens=400,
         system=REMIX_PROMPT_SYSTEM,
+        messages=[{"role": "user", "content": user_msg}],
+        timeout=20.0,
+    )
+    raw = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+    return _parse_json(raw)
+
+
+def _make_full_banner_prompt(
+    anthropic: Any,
+    *,
+    brand_context: dict,
+    headline: str,
+    caption: str,
+    platform: str,
+    brand_assets_ctx: str = "",
+    style_variant: str = "editorial",
+) -> dict:
+    """
+    Ask Claude to write an Ideogram prompt that includes the headline/caption as
+    rendered typography — the AI renders the complete banner including text.
+    style_variant: "editorial" | "lifestyle" | "bold"
+    """
+    parts = [
+        "BRAND CONTEXT:\n" + json.dumps(brand_context, indent=2),
+        "",
+        f'HEADLINE (must appear verbatim in the image): "{headline}"',
+        f'CAPTION (smaller text, if space allows): "{caption}"',
+        f"PLATFORM: {platform}",
+        f"STYLE VARIANT: {style_variant}",
+    ]
+    if brand_assets_ctx:
+        parts += ["", brand_assets_ctx]
+    parts += [
+        "",
+        f"Write a complete Ideogram banner prompt. The style variant is '{style_variant}' — follow the style rules exactly. "
+        "Include the headline text quoted verbatim so Ideogram renders it in the image.",
+    ]
+    user_msg = "\n".join(parts)
+    resp = anthropic.messages.create(
+        model=MODEL,
+        max_tokens=500,
+        system=FULL_BANNER_SYSTEM,
         messages=[{"role": "user", "content": user_msg}],
         timeout=20.0,
     )
@@ -381,51 +456,60 @@ def run_image_generation(
 
     print(f"[image_agent] prompt='{image_prompt[:120]}…' size={size}", flush=True)
 
-    # 3. Source image resolution:
-    #    - API key present + ideation photo → Ideogram remix (photo + prompt → enhanced image)
-    #    - API key present + no photo       → Ideogram text-to-image
-    #    - No API key + ideation photo      → use photo directly (overlay only, no Ideogram)
-    #    - No API key + no photo            → raises (caught upstream → select_best_asset fallback)
-    source_url = _get_ideation_asset_url(sb, content_item_id) if content_item_id else None
+    # 3. Two distinct paths depending on whether an Ideogram key is present:
+    #
+    #   KEY PRESENT — full AI banner (text rendered by Ideogram):
+    #     photo + full-banner prompt → Ideogram remix → complete banner (no PIL overlay)
+    #     no photo                  → Ideogram text-to-image → complete banner
+    #
+    #   NO KEY — overlay-only path (PIL templates):
+    #     photo → apply overlay_creative() (bar/split/solid)
+    #     no photo → raises (caught upstream → select_best_asset fallback)
+    source_url   = _get_ideation_asset_url(sb, content_item_id) if content_item_id else None
     resolved_key = (image_api_key or "").strip()
+    brand_color  = _extract_brand_color(brand_context)
 
-    if source_url and resolved_key:
-        source_bytes = _download_image_url(source_url)
-        remix_prompt = _make_remix_prompt(
+    if resolved_key:
+        # ── Full Ideogram path — AI renders text inside the image ──────────────
+        full_prompt_data = _make_full_banner_prompt(
             anthropic,
             brand_context=brand_context,
             headline=headline,
             caption=caption,
             platform=platform,
             brand_assets_ctx=brand_assets_text,
+            style_variant="editorial",
         )
-        image_bytes = _remix_ideogram(
-            source_bytes,
-            remix_prompt.get("prompt", image_prompt),
-            remix_prompt.get("negative_prompt", negative_prompt),
-            remix_prompt.get("size", size),
-            resolved_key,
-        )
-        provider = "ideogram-remix"
-        print(f"[image_agent] Ideogram remix complete ({len(image_bytes)//1024} KB)", flush=True)
-    elif source_url:
-        source_bytes = _download_image_url(source_url)
-        image_bytes  = source_bytes
-        provider     = "ideation-asset"
-        print(f"[image_agent] using ideation asset directly ({len(image_bytes)//1024} KB)", flush=True)
-    else:
-        _resolve_api_key(resolved_key)   # raises early if key missing
-        image_bytes, provider = _generate_image(image_prompt, negative_prompt, size, resolved_key)
+        fp  = full_prompt_data.get("prompt", image_prompt)
+        fnp = full_prompt_data.get("negative_prompt", negative_prompt)
+        fsz = full_prompt_data.get("size", size)
 
-    # 3b. Composite headline + body copy using brand fonts and colour
-    brand_color = _extract_brand_color(brand_context)
-    image_bytes = overlay_creative(
-        image_bytes, headline, sb,
-        body_text=caption,
-        brand_color=brand_color,
-        anthropic=anthropic,
-        platform=platform,
-    )
+        if source_url:
+            source_bytes = _download_image_url(source_url)
+            image_bytes  = _remix_ideogram(source_bytes, fp, fnp, fsz, resolved_key)
+            provider     = "ideogram-remix"
+            print(f"[image_agent] Ideogram remix (full banner) {len(image_bytes)//1024} KB", flush=True)
+        else:
+            image_bytes, provider = _generate_image(fp, fnp, fsz, resolved_key)
+            print(f"[image_agent] Ideogram generate (full banner) {len(image_bytes)//1024} KB", flush=True)
+        # No PIL overlay — text is already in the image
+    else:
+        # ── Overlay-only path — PIL templates applied to existing photo ─────────
+        if not source_url:
+            raise RuntimeError(
+                "No source image found and no Ideogram key configured. "
+                "Upload a product photo to the content item or enable Ideogram generation in Settings."
+            )
+        source_bytes = _download_image_url(source_url)
+        image_bytes  = overlay_creative(
+            source_bytes, headline, sb,
+            body_text=caption,
+            brand_color=brand_color,
+            anthropic=anthropic,
+            platform=platform,
+        )
+        provider = "ideation-asset"
+        print(f"[image_agent] overlay applied to ideation asset {len(image_bytes)//1024} KB", flush=True)
 
     # 4. Upload to storage
     bucket, storage_path, public_url = _upload_to_storage(sb, image_bytes, concept_id)
@@ -471,7 +555,8 @@ def run_image_generation(
 # Multi-variant generation — 3 templates from the same source image
 # ---------------------------------------------------------------------------
 
-_VARIANT_TEMPLATES = ["bar", "split", "solid"]
+_VARIANT_TEMPLATES  = ["bar", "split", "solid"]
+_IDEOGRAM_STYLES    = ["editorial", "lifestyle", "bold"]
 
 
 def run_banner_variants(
@@ -517,72 +602,110 @@ def run_banner_variants(
     if not image_prompt:
         raise RuntimeError("Claude returned an empty image prompt")
 
-    # 3. Get source image once — reuse for all 3 variant overlays
-    #    Same logic as run_image_generation: key + photo → remix; key only → generate; no key → raw photo
     source_url   = _get_ideation_asset_url(sb, content_item_id) if content_item_id else None
     resolved_key = (image_api_key or "").strip()
+    brand_color  = _extract_brand_color(brand_context)
 
-    if source_url and resolved_key:
-        raw_bytes = _download_image_url(source_url)
-        remix_prompt = _make_remix_prompt(
-            anthropic,
-            brand_context=brand_context,
-            headline=headline,
-            caption=caption,
-            platform=platform,
-            brand_assets_ctx=brand_assets_text,
-        )
-        source_bytes = _remix_ideogram(
-            raw_bytes,
-            remix_prompt.get("prompt", image_prompt),
-            remix_prompt.get("negative_prompt", negative_prompt),
-            remix_prompt.get("size", size),
-            resolved_key,
-        )
-        provider = "ideogram-remix"
-        print(f"[image_agent] variants — Ideogram remix ({len(source_bytes)//1024} KB)", flush=True)
-    elif source_url:
-        source_bytes = _download_image_url(source_url)
-        provider = "ideation-asset"
-        print(f"[image_agent] variants — using ideation asset ({len(source_bytes)//1024} KB)", flush=True)
-    else:
-        _resolve_api_key(resolved_key)
-        source_bytes, provider = _generate_image(image_prompt, negative_prompt, size, resolved_key)
-        print(f"[image_agent] variants — generated source ({len(source_bytes)//1024} KB)", flush=True)
+    # ── Determine which variant loop to run ────────────────────────────────────
+    #
+    #   KEY PRESENT — 3 Ideogram style variants (editorial / lifestyle / bold)
+    #     Each calls Ideogram with a different style prompt; text rendered by AI.
+    #     Photo is used as remix source if present, otherwise text-to-image.
+    #
+    #   NO KEY — 3 PIL template overlays (bar / split / solid) on existing photo.
+    #     Requires a product photo to be attached to the content item.
 
-    brand_color = _extract_brand_color(brand_context)
-
-    # 4. Apply each template overlay
     saved_assets: list[dict] = []
-    for tmpl in _VARIANT_TEMPLATES:
-        try:
-            variant_bytes = overlay_creative(
-                source_bytes, headline, sb,
-                body_text=caption,
-                brand_color=brand_color,
-                anthropic=anthropic,
-                platform=platform,
-                template_override=tmpl,
+
+    if resolved_key:
+        # ── Full Ideogram path: 3 style variants, text in image ───────────────
+        raw_source: bytes | None = None
+        if source_url:
+            raw_source = _download_image_url(source_url)
+            print(f"[image_agent] variants — remix source {len(raw_source)//1024} KB", flush=True)
+        else:
+            _resolve_api_key(resolved_key)
+
+        for style in _IDEOGRAM_STYLES:
+            try:
+                full_prompt_data = _make_full_banner_prompt(
+                    anthropic,
+                    brand_context=brand_context,
+                    headline=headline,
+                    caption=caption,
+                    platform=platform,
+                    brand_assets_ctx=brand_assets_text,
+                    style_variant=style,
+                )
+                fp  = full_prompt_data.get("prompt", image_prompt)
+                fnp = full_prompt_data.get("negative_prompt", negative_prompt)
+                fsz = full_prompt_data.get("size", size)
+
+                if raw_source:
+                    variant_bytes = _remix_ideogram(raw_source, fp, fnp, fsz, resolved_key)
+                    prov = f"ideogram-remix-{style}"
+                else:
+                    variant_bytes, _ = _generate_image(fp, fnp, fsz, resolved_key)
+                    prov = f"ideogram-generate-{style}"
+
+                print(f"[image_agent] variant {style} {len(variant_bytes)//1024} KB", flush=True)
+                bucket, storage_path, public_url = _upload_to_storage(sb, variant_bytes, concept_id)
+                filename = storage_path.split("/")[-1]
+                asset_row: dict = {
+                    "concept_id":   concept_id,
+                    "filename":     filename,
+                    "storage_path": storage_path,
+                    "mime_type":    "image/png",
+                    "asset_type":   "image",
+                    "generator":    "artcaffe-ai",
+                    "platform":     platform,
+                    "public_url":   public_url,
+                    "created_at":   _now(),
+                }
+                insert_res = sb.table("assets").insert(asset_row).execute()
+                saved = insert_res.data[0] if insert_res.data else asset_row
+                saved_assets.append({**saved, "_style": style, "_provider": prov})
+            except Exception as exc:
+                print(f"[image_agent] variant {style} failed: {exc}", flush=True)
+
+    else:
+        # ── Overlay-only path: 3 PIL templates on existing photo ──────────────
+        if not source_url:
+            raise RuntimeError(
+                "No source image found and Ideogram is disabled. "
+                "Upload a product photo to the content item or enable Ideogram in Settings."
             )
-            bucket, storage_path, public_url = _upload_to_storage(sb, variant_bytes, concept_id)
-            filename = storage_path.split("/")[-1]
-            asset_row: dict = {
-                "concept_id":   concept_id,
-                "filename":     filename,
-                "storage_path": storage_path,
-                "mime_type":    "image/png",
-                "asset_type":   "image",
-                "generator":    "artcaffe-ai",
-                "platform":     platform,
-                "public_url":   public_url,
-                "created_at":   _now(),
-            }
-            insert_res = sb.table("assets").insert(asset_row).execute()
-            saved = insert_res.data[0] if insert_res.data else asset_row
-            saved_assets.append({**saved, "_template": tmpl, "_provider": provider})
-            print(f"[image_agent] variant {tmpl} uploaded → {public_url[:60]}…", flush=True)
-        except Exception as exc:
-            print(f"[image_agent] variant {tmpl} failed: {exc}", flush=True)
+        source_bytes = _download_image_url(source_url)
+
+        for tmpl in _VARIANT_TEMPLATES:
+            try:
+                variant_bytes = overlay_creative(
+                    source_bytes, headline, sb,
+                    body_text=caption,
+                    brand_color=brand_color,
+                    anthropic=anthropic,
+                    platform=platform,
+                    template_override=tmpl,
+                )
+                bucket, storage_path, public_url = _upload_to_storage(sb, variant_bytes, concept_id)
+                filename = storage_path.split("/")[-1]
+                asset_row = {
+                    "concept_id":   concept_id,
+                    "filename":     filename,
+                    "storage_path": storage_path,
+                    "mime_type":    "image/png",
+                    "asset_type":   "image",
+                    "generator":    "artcaffe-ai",
+                    "platform":     platform,
+                    "public_url":   public_url,
+                    "created_at":   _now(),
+                }
+                insert_res = sb.table("assets").insert(asset_row).execute()
+                saved = insert_res.data[0] if insert_res.data else asset_row
+                saved_assets.append({**saved, "_template": tmpl, "_provider": "ideation-asset"})
+                print(f"[image_agent] overlay variant {tmpl} uploaded", flush=True)
+            except Exception as exc:
+                print(f"[image_agent] overlay variant {tmpl} failed: {exc}", flush=True)
 
     # 5. Attach all variants to content item in one update
     if content_item_id and saved_assets:
