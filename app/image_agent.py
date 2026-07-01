@@ -91,36 +91,69 @@ Rules:
 """
 
 FULL_BANNER_SYSTEM = """\
-You are a senior art director at an AI-native creative studio producing complete marketing banners
-for Artcaffe Coffee & Restaurant — a premium café brand in Nairobi, Kenya.
+You are a senior graphic designer producing complete, print-ready marketing posters for
+Artcaffe Coffee & Restaurant — a premium café brand in Nairobi, Kenya.
 
-The AI image generator (Ideogram) will render the ENTIRE finished banner including the text.
-Your job: write a single, highly detailed prompt that describes both the visual scene AND the
-exact typography — so Ideogram renders the headline and caption directly in the image.
+An AI image generator (Ideogram or OpenAI gpt-image-1) will render the ENTIRE finished poster.
+Your job: write a single, highly detailed prompt that describes a GRAPHIC DESIGN — not a photograph.
+Think: professionally designed marketing flyer with layout zones, typography, icons, and a CTA.
 
 Output ONLY a JSON object — no markdown, no prose:
 {
-  "prompt": "complete banner description with typography instructions",
-  "negative_prompt": "what to avoid",
+  "prompt": "...",
+  "negative_prompt": "...",
   "size": "1080x1350"
 }
 
-Typography rules (Ideogram renders text, so be precise):
-- Always quote the exact headline: with the text "HEADLINE HERE" in [weight] [colour] typography
-- Describe placement: at the bottom / centered / upper third
-- Describe type style: bold white sans-serif / elegant serif / heavy condensed uppercase
-- Add the caption in smaller text below the headline if space allows
+PROMPT STRUCTURE — describe every element below:
 
-Visual style rules:
-- Mood: warm, premium, aspirational — not generic stock photo
-- Artcaffe colours: forest green (#1B3A2A), cream (#F5EBD5), warm blacks
-- NO Artcaffe logo or wordmark (add separately)
-- Size: "1080x1350" for Instagram 4:5 (DEFAULT), "1024x1792" for stories, "1024x1024" for square
+1. BACKGROUND
+   Flat colour panel, warm gradient, or lightly textured paper — use Artcaffe palette.
+   Examples: "forest-green (#1B3A2A) background", "warm cream (#F5EBD5) paper texture"
 
-Style variants (caller passes style_hint — follow exactly):
-  editorial  → clean white space, minimal composition, typographic hierarchy, sans-serif
-  lifestyle  → atmospheric depth, soft bokeh, warm tones, text integrated naturally into scene
-  bold       → high contrast, punchy, oversized headline dominates, graphic impact\
+2. PRODUCT PHOTO
+   The hero element — positioned clearly: centred hero, right-hand panel, or top-half inset.
+   Describe it vividly so the generator places it correctly.
+
+3. HEADLINE
+   Quote the exact text. State weight (black / bold / heavy), colour, size (dominant / large),
+   and position (upper third / centred / left panel).
+   Example: large bold white sans-serif text "WEEKEND PACK" in the upper-left
+
+4. SUBHEADING / CAPTION
+   Exact text, smaller than headline, colour, position beneath the headline.
+
+5. BULLET ROWS (if the caption lists features)
+   Describe as 2–4 icon + text rows: small green leaf icon followed by "Premium Meats", etc.
+
+6. CTA BUTTON
+   Always include one. Shape: pill or rounded rectangle. Colour, label quoted exactly.
+   Example: forest-green pill button labelled "ORDER NOW"
+
+7. BADGE / CALLOUT (optional)
+   Circular or ribbon badge with short bold text: "NEW", "LIMITED TIME", "PERFECT FOR X".
+   Position: top-right corner or overlapping the product photo.
+
+8. FOOTER STRIP
+   Thin strip at the bottom: website URL and/or a one-line tagline.
+
+9. DECORATIVE ACCENTS
+   Subtle brand touches: thin gold rule, small leaf motif, diagonal stripe, geometric frame.
+
+Artcaffe brand:
+  Colours: forest green #1B3A2A · warm cream #F5EBD5 · warm red #C0392B · muted gold
+  Typography personality: bold condensed display sans-serif for headlines, clean body
+  Tone: premium, warm, aspirational — Nairobi urban lifestyle
+
+SIZE: "1080x1350" (Instagram 4:5, DEFAULT) · "1024x1792" (Stories) · "1024x1024" (Square)
+
+Style variants — follow exactly:
+  editorial  → cream/white background, centred product hero, dark-green bold headline,
+               icon bullet rows, clean grid layout, minimal decoration
+  lifestyle  → split layout: left forest-green panel (white headline + icon rows + CTA pill),
+               right side shows the product photo; warm earthy tones
+  bold       → full-bleed dark-green or deep-red background, oversized cream/white headline
+               dominates upper half, product photo inset lower-right, high contrast badge
 """
 
 
@@ -167,15 +200,22 @@ def _make_full_banner_prompt(
     style_variant: str = "editorial",
 ) -> dict:
     """
-    Ask Claude to write an Ideogram prompt that includes the headline/caption as
-    rendered typography — the AI renders the complete banner including text.
+    Ask Claude to write a graphic-design poster prompt — the AI renders the
+    complete marketing poster including all layout elements and text.
     style_variant: "editorial" | "lifestyle" | "bold"
     """
+    # Break caption into bullet hints if it contains commas or line breaks
+    caption_lines = [l.strip() for l in caption.replace("\n", ",").split(",") if l.strip()]
+    bullet_hint = ""
+    if len(caption_lines) > 1:
+        bullet_hint = f"The caption has {len(caption_lines)} points that can become icon-bullet rows: " + " | ".join(caption_lines[:4])
+
     parts = [
         "BRAND CONTEXT:\n" + json.dumps(brand_context, indent=2),
         "",
-        f'HEADLINE (must appear verbatim in the image): "{headline}"',
-        f'CAPTION (smaller text, if space allows): "{caption}"',
+        f'HEADLINE (quote verbatim in the poster): "{headline}"',
+        f'CAPTION: "{caption}"',
+        bullet_hint,
         f"PLATFORM: {platform}",
         f"STYLE VARIANT: {style_variant}",
     ]
@@ -183,16 +223,18 @@ def _make_full_banner_prompt(
         parts += ["", brand_assets_ctx]
     parts += [
         "",
-        f"Write a complete Ideogram banner prompt. The style variant is '{style_variant}' — follow the style rules exactly. "
-        "Include the headline text quoted verbatim so Ideogram renders it in the image.",
+        f"Design a complete marketing poster in the '{style_variant}' style. "
+        "Follow the PROMPT STRUCTURE: background, product photo placement, headline (verbatim), "
+        "subheading, bullet rows (if applicable), CTA button, optional badge, footer strip, accents. "
+        "The result must look like a professionally designed flyer — not a photograph.",
     ]
-    user_msg = "\n".join(parts)
+    user_msg = "\n".join(p for p in parts if p is not None)
     resp = anthropic.messages.create(
         model=MODEL,
-        max_tokens=500,
+        max_tokens=800,
         system=FULL_BANNER_SYSTEM,
         messages=[{"role": "user", "content": user_msg}],
-        timeout=20.0,
+        timeout=25.0,
     )
     raw = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
     return _parse_json(raw)
@@ -512,11 +554,11 @@ def run_image_generation(
 
     print(f"[image_agent] prompt='{image_prompt[:120]}…' size={size}", flush=True)
 
-    # 3. Two distinct paths depending on whether an Ideogram key is present:
+    # 3. Two distinct paths depending on whether an API key is present:
     #
-    #   KEY PRESENT — full AI banner (text rendered by Ideogram):
-    #     photo + full-banner prompt → Ideogram remix → complete banner (no PIL overlay)
-    #     no photo                  → Ideogram text-to-image → complete banner
+    #   KEY PRESENT — full AI poster (text + layout rendered by provider):
+    #     photo + poster prompt → provider edit/remix → complete poster (no PIL overlay)
+    #     no photo              → provider text-to-image → complete poster
     #
     #   NO KEY — overlay-only path (PIL templates):
     #     photo → apply overlay_creative() (bar/split/solid)
