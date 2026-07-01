@@ -6,17 +6,18 @@ Generates marketing banner images using an AI image generation API.
 Workflow (preferred — ideation asset present):
   1. Fetch the existing image attached to the content item during ideation
   2. Claude generates an enhancement prompt describing the subject
-  3. Ideogram /remix polishes the photo while preserving the original subject
+  3. Provider (Ideogram or OpenAI) enhances the photo while preserving the subject
   4. Text overlay (headline + body) composited via image_overlay
   5. Composited image uploaded to Supabase Storage + asset row created
 
 Workflow (fallback — no ideation asset):
   1. Claude generates a brand-aligned text-to-image prompt
-  2. Ideogram /generate creates a fresh banner image
+  2. Provider creates a fresh banner image
   3–5. Same as above
 
 Env vars:
   IDEOGRAM_API_KEY    — Ideogram V2 API key
+  OPENAI_API_KEY      — OpenAI API key (for gpt-image-1)
   ASSETS_BUCKET       — storage bucket for generated images (default: "generated-assets")
 """
 from __future__ import annotations
@@ -39,6 +40,7 @@ from brand_assets_context import format_for_image_prompt, load_brand_assets_cont
 # ---------------------------------------------------------------------------
 MODEL = "claude-haiku-4-5-20251001"
 IDEOGRAM_API_KEY = os.environ.get("IDEOGRAM_API_KEY", "")
+OPENAI_API_KEY   = os.environ.get("OPENAI_API_KEY", "")
 ASSETS_BUCKET = os.environ.get("ASSETS_BUCKET", "generated-assets")
 FALLBACK_BUCKET = os.environ.get("BRAND_BUCKET", "brand-guidelines")
 
@@ -262,6 +264,15 @@ def _resolve_api_key(key_override: str) -> str:
     return key
 
 
+def _resolve_openai_key(key_override: str) -> str:
+    key = key_override.strip() or OPENAI_API_KEY
+    if not key:
+        raise RuntimeError(
+            "No OpenAI key configured. Add your OpenAI API key in Settings → AI image generation."
+        )
+    return key
+
+
 def _download_image_url(url: str) -> bytes:
     r = httpx.get(url, timeout=60.0, follow_redirects=True)
     r.raise_for_status()
@@ -329,6 +340,50 @@ def _generate_image(
 ) -> tuple[bytes, str]:
     """Text-to-image via Ideogram V2. Returns (bytes, 'ideogram')."""
     return _generate_ideogram(prompt, negative_prompt, size, _resolve_api_key(key_override)), "ideogram"
+
+
+# ---------------------------------------------------------------------------
+# OpenAI image generation (gpt-image-1)
+# ---------------------------------------------------------------------------
+
+_OPENAI_SIZE_MAP = {
+    "1024x1024": "1024x1024",
+    "1792x1024": "1536x1024",   # closest landscape
+    "1024x1792": "1024x1536",   # closest portrait
+    "1080x1350": "1024x1536",   # 4:5 Instagram portrait
+}
+
+
+def _generate_openai(prompt: str, size: str, api_key: str) -> bytes:
+    """Text-to-image via OpenAI gpt-image-1. Returns PNG bytes."""
+    import base64 as _b64
+    import openai as _oai
+    client = _oai.OpenAI(api_key=api_key)
+    oai_size = _OPENAI_SIZE_MAP.get(size, "1024x1024")
+    response = client.images.generate(
+        model="gpt-image-1",
+        prompt=prompt,
+        n=1,
+        size=oai_size,
+    )
+    return _b64.b64decode(response.data[0].b64_json)
+
+
+def _edit_openai(source_bytes: bytes, prompt: str, size: str, api_key: str) -> bytes:
+    """Image-to-image edit via OpenAI gpt-image-1. Returns PNG bytes."""
+    import base64 as _b64
+    import io as _io
+    import openai as _oai
+    client = _oai.OpenAI(api_key=api_key)
+    oai_size = _OPENAI_SIZE_MAP.get(size, "1024x1024")
+    response = client.images.edit(
+        model="gpt-image-1",
+        image=("source.png", _io.BytesIO(source_bytes), "image/png"),
+        prompt=prompt,
+        n=1,
+        size=oai_size,
+    )
+    return _b64.b64decode(response.data[0].b64_json)
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +477,7 @@ def run_image_generation(
     caption: str,
     platform: str = "instagram",
     image_api_key: str = "",
+    image_provider: str = "ideogram",
 ) -> dict:
     """
     Generate a banner image and save it as an asset.
@@ -470,7 +526,7 @@ def run_image_generation(
     brand_color  = _extract_brand_color(brand_context)
 
     if resolved_key:
-        # ── Full Ideogram path — AI renders text inside the image ──────────────
+        # ── Full AI banner path — text rendered by the provider ───────────────
         full_prompt_data = _make_full_banner_prompt(
             anthropic,
             brand_context=brand_context,
@@ -484,14 +540,26 @@ def run_image_generation(
         fnp = full_prompt_data.get("negative_prompt", negative_prompt)
         fsz = full_prompt_data.get("size", size)
 
-        if source_url:
-            source_bytes = _download_image_url(source_url)
-            image_bytes  = _remix_ideogram(source_bytes, fp, fnp, fsz, resolved_key)
-            provider     = "ideogram-remix"
-            print(f"[image_agent] Ideogram remix (full banner) {len(image_bytes)//1024} KB", flush=True)
+        if image_provider == "openai":
+            oai_key = _resolve_openai_key(resolved_key)
+            if source_url:
+                source_bytes = _download_image_url(source_url)
+                image_bytes  = _edit_openai(source_bytes, fp, fsz, oai_key)
+                provider     = "openai-edit"
+                print(f"[image_agent] OpenAI edit (full banner) {len(image_bytes)//1024} KB", flush=True)
+            else:
+                image_bytes  = _generate_openai(fp, fsz, oai_key)
+                provider     = "openai-generate"
+                print(f"[image_agent] OpenAI generate (full banner) {len(image_bytes)//1024} KB", flush=True)
         else:
-            image_bytes, provider = _generate_image(fp, fnp, fsz, resolved_key)
-            print(f"[image_agent] Ideogram generate (full banner) {len(image_bytes)//1024} KB", flush=True)
+            if source_url:
+                source_bytes = _download_image_url(source_url)
+                image_bytes  = _remix_ideogram(source_bytes, fp, fnp, fsz, resolved_key)
+                provider     = "ideogram-remix"
+                print(f"[image_agent] Ideogram remix (full banner) {len(image_bytes)//1024} KB", flush=True)
+            else:
+                image_bytes, provider = _generate_image(fp, fnp, fsz, resolved_key)
+                print(f"[image_agent] Ideogram generate (full banner) {len(image_bytes)//1024} KB", flush=True)
         # No PIL overlay — text is already in the image
     else:
         # ── Overlay-only path — PIL templates applied to existing photo ─────────
@@ -569,6 +637,7 @@ def run_banner_variants(
     caption: str,
     platform: str = "instagram",
     image_api_key: str = "",
+    image_provider: str = "ideogram",
 ) -> list[dict]:
     """
     Generate 3 banner variants (bar / split / solid) from the same source image.
@@ -618,13 +687,16 @@ def run_banner_variants(
     saved_assets: list[dict] = []
 
     if resolved_key:
-        # ── Full Ideogram path: 3 style variants, text in image ───────────────
+        # ── Full AI path: 3 style variants, text rendered by provider ─────────
         raw_source: bytes | None = None
         if source_url:
             raw_source = _download_image_url(source_url)
-            print(f"[image_agent] variants — remix source {len(raw_source)//1024} KB", flush=True)
+            print(f"[image_agent] variants — source {len(raw_source)//1024} KB", flush=True)
         else:
-            _resolve_api_key(resolved_key)
+            if image_provider == "openai":
+                _resolve_openai_key(resolved_key)
+            else:
+                _resolve_api_key(resolved_key)
 
         for style in _IDEOGRAM_STYLES:
             try:
@@ -641,7 +713,15 @@ def run_banner_variants(
                 fnp = full_prompt_data.get("negative_prompt", negative_prompt)
                 fsz = full_prompt_data.get("size", size)
 
-                if raw_source:
+                if image_provider == "openai":
+                    oai_key = _resolve_openai_key(resolved_key)
+                    if raw_source:
+                        variant_bytes = _edit_openai(raw_source, fp, fsz, oai_key)
+                        prov = f"openai-edit-{style}"
+                    else:
+                        variant_bytes = _generate_openai(fp, fsz, oai_key)
+                        prov = f"openai-generate-{style}"
+                elif raw_source:
                     variant_bytes = _remix_ideogram(raw_source, fp, fnp, fsz, resolved_key)
                     prov = f"ideogram-remix-{style}"
                 else:
