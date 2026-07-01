@@ -293,7 +293,7 @@ _ASPECT_MAP = {
     "1024x1024": "ASPECT_1_1",
     "1792x1024": "ASPECT_16_9",
     "1024x1792": "ASPECT_9_16",
-    "1080x1350": "ASPECT_4_5",   # Instagram 4:5 portrait (guidelines section 9)
+    "1080x1350": "ASPECT_3_4",   # Instagram 4:5 — closest valid Ideogram enum (ASPECT_4_5 not supported)
 }
 
 
@@ -336,7 +336,8 @@ def _generate_ideogram(prompt: str, negative_prompt: str, size: str, api_key: st
         }},
         timeout=90.0,
     )
-    r.raise_for_status()
+    if not r.is_success:
+        raise RuntimeError(f"Ideogram /generate {r.status_code}: {r.text[:400]}")
     return _download_image_url(r.json()["data"][0]["url"])
 
 
@@ -363,14 +364,22 @@ def _remix_ideogram(
         "style_type": "REALISTIC",
         "image_weight": image_weight,
     })
+    # Convert source to JPEG — Ideogram remix requires JPEG or PNG; mislabelled images cause 400s
+    from PIL import Image as _PIL_Image
+    _img = _PIL_Image.open(_io.BytesIO(source_bytes)).convert("RGB")
+    _buf = _io.BytesIO()
+    _img.save(_buf, format="JPEG", quality=92)
+    jpeg_bytes = _buf.getvalue()
+
     r = httpx.post(
         "https://api.ideogram.ai/remix",
         headers={"Api-Key": api_key},
         data={"image_request": image_request},
-        files={"image_file": ("source.jpg", _io.BytesIO(source_bytes), "image/jpeg")},
+        files={"image_file": ("source.jpg", _io.BytesIO(jpeg_bytes), "image/jpeg")},
         timeout=120.0,
     )
-    r.raise_for_status()
+    if not r.is_success:
+        raise RuntimeError(f"Ideogram /remix {r.status_code}: {r.text[:400]}")
     return _download_image_url(r.json()["data"][0]["url"])
 
 
