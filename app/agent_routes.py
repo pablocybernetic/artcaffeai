@@ -11,6 +11,8 @@ Endpoints:
   POST   /agents/production           — enqueue a production job (approved items only)
   GET    /agents/items/{brief_id}     — list content items for a brief
   PATCH  /agents/items/{item_id}      — update content item status
+  POST   /agents/master               — run Master Agent cycle (scan, recover, analyse)
+  GET    /agents/master/status        — latest Master Agent report
 """
 from __future__ import annotations
 
@@ -375,6 +377,60 @@ def schedule_publish(req: SchedulePublishRequest):
     }
 
 
+@router.post("/master")
+def trigger_master_agent(bg: BackgroundTasks):
+    """
+    Run the Master Agent cycle in the background:
+      1. Recover stuck jobs (running >15 min)
+      2. Scan all pipeline state across every concept
+      3. Claude Sonnet analyses and produces prioritised actions
+      4. Result stored in jobs table (agent_type='master')
+    Returns a job_id immediately; poll /agents/master/status for the result.
+    """
+    import uuid as _uuid  # noqa: PLC0415
+
+    job_id = str(_uuid.uuid4())
+
+    def _run():
+        try:
+            from anthropic import Anthropic  # noqa: PLC0415
+            from master_agent import run_master_agent  # noqa: PLC0415
+            anthropic = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+            run_master_agent(sb, anthropic)
+        except Exception as exc:
+            import traceback as _tb  # noqa: PLC0415
+            print(f"[master_agent] background run failed: {exc}\n{_tb.format_exc()}", flush=True)
+
+    bg.add_task(_run)
+    return {"ok": True, "status": "queued", "message": "Master Agent cycle started in background"}
+
+
+@router.get("/master/status")
+def get_master_status():
+    """
+    Return the most recent Master Agent report.
+    The report is stored in the jobs table with agent_type='master'.
+    """
+    res = (
+        sb.table("jobs")
+        .select("id,result,created_at,status")
+        .eq("agent_type", "master")
+        .eq("status", "succeeded")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not res.data:
+        return {"ok": False, "error": "No Master Agent report found — click 'Run Master Agent' to generate one"}
+    row = res.data[0]
+    return {
+        "ok": True,
+        "job_id": row["id"],
+        "generated_at": row["created_at"],
+        "report": row.get("result") or {},
+    }
+
+
 @router.get("/prompts")
 def get_agent_prompts():
     """Return the live system prompts and models used by every agent."""
@@ -383,6 +439,7 @@ def get_agent_prompts():
     from production_agent import SYSTEM_PROMPT as production_prompt, MODEL as production_model  # noqa: PLC0415
     from image_agent import PROMPT_SYSTEM as image_prompt, MODEL as image_model  # noqa: PLC0415
     from data_routes import DATA_AGENT_SYSTEM_PROMPT, DATA_AGENT_MODEL  # noqa: PLC0415
+    from master_agent import MASTER_SYSTEM as master_prompt, MODEL as master_model  # noqa: PLC0415
 
     research_model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
@@ -422,6 +479,13 @@ def get_agent_prompts():
                 "model": image_model,
                 "trigger": "Runs when \"Generate banner\" is clicked (AI image generation must be enabled)",
                 "prompt": image_prompt,
+            },
+            {
+                "id": "master",
+                "name": "Master Agent",
+                "model": master_model,
+                "trigger": "Runs on demand via the Master Agent panel — scans all pipeline state and recovers stuck jobs",
+                "prompt": master_prompt,
             },
         ]
     }
