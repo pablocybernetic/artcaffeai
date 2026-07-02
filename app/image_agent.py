@@ -90,8 +90,67 @@ Rules:
 - Size: "1024x1024" for square posts, "1792x1024" for landscape, "1024x1792" for stories\
 """
 
+OPENAI_BANNER_SYSTEM = """\
+You are an award-winning Creative Director specialising in premium food, retail, and lifestyle advertising.
+
+Your job is to transform a product image into a luxury social media advertisement that looks like it was
+designed by a senior agency designer for OpenAI gpt-image-1.
+
+OBJECTIVE
+The uploaded product image is ALWAYS the hero of the advertisement.
+- Never replace the product.
+- Never invent a different product.
+- Never crop important parts of the product.
+- Preserve branding and packaging.
+
+DESIGN PHILOSOPHY — campaigns from: Apple · Aesop · Whole Foods · Erewhon · Starbucks Reserve · Artcaffé Market
+Minimal. Premium. Luxury. Editorial. Magazine-quality. Never clipart or a template.
+
+LAYOUT
+- Strong visual hierarchy.
+- Generous whitespace.
+- Product remains the focal point.
+- Text NEVER covers important parts of the product — place in empty background, corners, negative space, margins.
+
+TYPOGRAPHY
+- Bold condensed sans-serif: Bebas Neue / Oswald / Anton / DIN Condensed / Helvetica Condensed
+- Hierarchy: Headline → Supporting copy → CTA → Brand
+- Large type, tight spacing. Never decorative fonts.
+
+COLOUR PALETTE — extract from product; prefer:
+Deep Forest Green · Cream · Warm White · Charcoal · Sand · Dark Brown · Muted Gold · Warm Red
+Never random saturated colours.
+
+IMAGE TREATMENT
+- Preserve the uploaded product exactly.
+- Improve: lighting, contrast, clarity, texture, depth.
+- Subtle shadows, realistic lighting. Never distort food, never change packaging.
+
+TEXT PLACEMENT
+- Headline: upper third, large, maximum impact.
+- Supporting copy: below headline, smaller, readable.
+- CTA: bottom third, large pill button, high contrast.
+- Logo: top corner, small, clean.
+- Footer: website · brand · optional slogan.
+
+DECORATIVE ELEMENTS ALLOWED: thin lines · soft gradients · subtle leaf motifs · minimal icons · soft shadows · small badges
+NOT ALLOWED: confetti · stickers · comic graphics · busy backgrounds · cheap effects
+
+FOOD ADVERTISING RULES
+Food must always look: fresh · warm · appetising · premium · crispy · natural · high-end.
+Lighting should resemble professional food photography.
+
+Output ONLY a JSON object — no markdown, no prose:
+{
+  "prompt": "...",
+  "negative_prompt": "...",
+  "size": "1080x1350"
+}
+"""
+
+
 FULL_BANNER_SYSTEM = """\
-You are a senior art director writing prompts for AI image generators (Ideogram, OpenAI)
+You are a senior art director writing prompts for Ideogram V2
 to produce marketing banners for Artcaffe Coffee & Restaurant — a premium café brand in Nairobi, Kenya.
 
 CRITICAL RULE when a source photo is supplied:
@@ -169,6 +228,14 @@ def _make_remix_prompt(
     return _parse_json(raw)
 
 
+_PLATFORM_SPEC = {
+    "instagram": "Instagram Feed 1080×1350",
+    "story":     "Instagram Story 1080×1920",
+    "facebook":  "Facebook Feed 1200×1500",
+    "google_ads":"Google Display — responsive",
+}
+
+
 def _make_full_banner_prompt(
     anthropic: Any,
     *,
@@ -178,43 +245,84 @@ def _make_full_banner_prompt(
     platform: str,
     brand_assets_ctx: str = "",
     style_variant: str = "editorial",
+    provider: str = "ideogram",
 ) -> dict:
     """
-    Ask Claude to write a graphic-design poster prompt — the AI renders the
-    complete marketing poster including all layout elements and text.
+    Ask Claude to write a banner prompt for the given provider.
+    provider: "openai" uses the creative-director system prompt with dynamic template injection.
+              "ideogram" uses the overlay-only system prompt.
     style_variant: "editorial" | "lifestyle" | "bold"
     """
-    # Break caption into bullet hints if it contains commas or line breaks
-    caption_lines = [l.strip() for l in caption.replace("\n", ",").split(",") if l.strip()]
-    bullet_hint = ""
-    if len(caption_lines) > 1:
-        bullet_hint = f"The caption has {len(caption_lines)} points that can become icon-bullet rows: " + " | ".join(caption_lines[:4])
+    brand_name  = brand_context.get("name") or brand_context.get("brand_name") or "Artcaffé Market"
+    website     = brand_context.get("website") or "www.artcaffe.co.ke"
+    audience    = brand_context.get("target_audience") or "Premium food and coffee lovers in Nairobi, Kenya"
+    colors_raw  = brand_context.get("colors") or brand_context.get("brand_colors") or {}
+    if isinstance(colors_raw, dict):
+        colors_str = ", ".join(f"{k}: {v}" for k, v in list(colors_raw.items())[:4])
+    elif isinstance(colors_raw, list):
+        colors_str = ", ".join(str(c) for c in colors_raw[:4])
+    else:
+        colors_str = str(colors_raw) or "Forest Green #1B3A2A, Cream #F5EBD5, Warm Red #C0392B"
+    platform_spec = _PLATFORM_SPEC.get(platform, "Instagram Feed 1080×1350")
 
-    parts = [
-        "BRAND CONTEXT:\n" + json.dumps(brand_context, indent=2),
-        "",
-        f'HEADLINE (quote verbatim in the poster): "{headline}"',
-        f'CAPTION: "{caption}"',
-        bullet_hint,
-        f"PLATFORM: {platform}",
-        f"STYLE VARIANT: {style_variant}",
-    ]
-    if brand_assets_ctx:
-        parts += ["", brand_assets_ctx]
-    parts += [
-        "",
-        f"Write the image generator prompt in the '{style_variant}' style. "
-        "CRITICAL: do NOT describe or mention the food, dish, or any objects in the source photo — "
-        "describing food causes the AI (Ideogram or OpenAI) to replace it with a completely different dish. "
-        "Start with: 'Source photo used as full-bleed background — do not alter or replace any food or objects.' "
-        "Then add only: the overlay opacity for this style, the headline verbatim in large bold white sans-serif, "
-        "the caption in smaller white text, and optionally a badge. Keep it clean and minimal.",
-    ]
-    user_msg = "\n".join(p for p in parts if p is not None)
+    if provider == "openai":
+        system = OPENAI_BANNER_SYSTEM
+        user_msg = f"""\
+Create a premium editorial-style social media banner.
+
+Brand: {brand_name}
+Product: (use the uploaded product image — do not replace or invent a new product)
+Headline: {headline}
+Subheadline: {caption}
+CTA: Order Now
+Logo: {brand_name} (top corner, small, clean)
+Website: {website}
+Primary Colors: {colors_str}
+Target Audience: {audience}
+Platform: {platform_spec}
+Style Variant: {style_variant}
+
+Style:
+Luxury, minimal, editorial, magazine-quality, premium food advertising, strong typography,
+clean grid layout, generous whitespace, subtle gradients, realistic lighting, high-end retail branding.
+
+Rules:
+- Preserve the uploaded product exactly — never replace, alter, or crop it.
+- Never cover the product with text — use only available negative space.
+- Keep the product as the visual hero.
+- Improve lighting and shadows naturally.
+- Place the logo elegantly in a corner.
+- Produce a campaign-quality advertisement suitable for Meta Ads, Google Ads, and Instagram.
+
+Output ONLY a JSON object: {{"prompt":"...","negative_prompt":"...","size":"1080x1350"}}"""
+    else:
+        # ── Ideogram: overlay-only, never describe the food ──────────────────
+        system = FULL_BANNER_SYSTEM
+        parts = [
+            "BRAND CONTEXT:\n" + json.dumps(brand_context, indent=2),
+            "",
+            f'HEADLINE (quote verbatim in the poster): "{headline}"',
+            f'CAPTION: "{caption}"',
+            f"PLATFORM: {platform}",
+            f"STYLE VARIANT: {style_variant}",
+        ]
+        if brand_assets_ctx:
+            parts += ["", brand_assets_ctx]
+        parts += [
+            "",
+            f"Write the Ideogram prompt in the '{style_variant}' style. "
+            "CRITICAL: do NOT describe or mention the food, dish, or any objects in the source photo — "
+            "describing food causes Ideogram to replace it with a completely different dish. "
+            "Start with: 'Source photo used as full-bleed background — do not alter or replace any food or objects.' "
+            "Then add only: the overlay opacity for this style, the headline verbatim in large bold white sans-serif, "
+            "the caption in smaller white text, and optionally a badge. Keep it clean and minimal.",
+        ]
+        user_msg = "\n".join(p for p in parts if p)
+
     resp = anthropic.messages.create(
         model=MODEL,
         max_tokens=800,
-        system=FULL_BANNER_SYSTEM,
+        system=system,
         messages=[{"role": "user", "content": user_msg}],
         timeout=25.0,
     )
@@ -561,7 +669,6 @@ def run_image_generation(
     if resolved_key:
         if image_provider == "openai":
             # ── OpenAI path: full poster rendered by gpt-image-1 (text + layout) ──
-            # OpenAI reliably renders exact text, so we send a complete design brief.
             full_prompt_data = _make_full_banner_prompt(
                 anthropic,
                 brand_context=brand_context,
@@ -570,6 +677,7 @@ def run_image_generation(
                 platform=platform,
                 brand_assets_ctx=brand_assets_text,
                 style_variant="editorial",
+                provider="openai",
             )
             fp  = full_prompt_data.get("prompt", image_prompt)
             fsz = full_prompt_data.get("size", size)
@@ -748,6 +856,7 @@ def run_banner_variants(
                         platform=platform,
                         brand_assets_ctx=brand_assets_text,
                         style_variant=style,
+                        provider="openai",
                     )
                     fp  = full_prompt_data.get("prompt", image_prompt)
                     fsz = full_prompt_data.get("size", size)
