@@ -91,14 +91,15 @@ Rules:
 """
 
 FULL_BANNER_SYSTEM = """\
-You are a senior art director writing prompts for Ideogram V2 to produce marketing banners
-for Artcaffe Coffee & Restaurant — a premium café brand in Nairobi, Kenya.
+You are a senior art director writing prompts for AI image generators (Ideogram, OpenAI)
+to produce marketing banners for Artcaffe Coffee & Restaurant — a premium café brand in Nairobi, Kenya.
 
-CRITICAL RULE when a source photo is supplied (remix mode):
-  - DO NOT alter, reimagine, or regenerate the food or product in the photo.
-  - The food/drink must stay exactly as photographed — same composition, same dish.
-  - Your job is to ADD text and a subtle dark overlay ON TOP of the photo.
-  - Never describe new food, new props, or a new scene.
+CRITICAL RULE when a source photo is supplied:
+  - DO NOT describe, mention, or reference the food or product in the photo.
+  - DO NOT alter, reimagine, or regenerate the food or product.
+  - Describing the food causes the AI to replace it with a different dish — never do this.
+  - Your job is only to ADD text and a dark overlay ON TOP of the existing photo.
+  - Never introduce new food, new props, or a new scene.
 
 Output ONLY a JSON object — no markdown, no prose:
 {
@@ -202,9 +203,9 @@ def _make_full_banner_prompt(
         parts += ["", brand_assets_ctx]
     parts += [
         "",
-        f"Write the Ideogram prompt in the '{style_variant}' style. "
-        "IMPORTANT: do NOT describe or mention the food, dish, or any objects in the photo — "
-        "describing food causes Ideogram to replace it with a different dish. "
+        f"Write the image generator prompt in the '{style_variant}' style. "
+        "CRITICAL: do NOT describe or mention the food, dish, or any objects in the source photo — "
+        "describing food causes the AI (Ideogram or OpenAI) to replace it with a completely different dish. "
         "Start with: 'Source photo used as full-bleed background — do not alter or replace any food or objects.' "
         "Then add only: the overlay opacity for this style, the headline verbatim in large bold white sans-serif, "
         "the caption in smaller white text, and optionally a badge. Keep it clean and minimal.",
