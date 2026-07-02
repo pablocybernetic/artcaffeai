@@ -615,6 +615,7 @@ def run_image_generation(
             fp  = full_prompt_data.get("prompt", image_prompt)
             fnp = full_prompt_data.get("negative_prompt", negative_prompt)
             fsz = full_prompt_data.get("size", size)
+            print(f"[image_agent] IDEOGRAM PROMPT >>>\n{fp}\n<<<", flush=True)
             if source_url:
                 source_bytes = _download_image_url(source_url)
                 image_bytes  = _remix_ideogram(source_bytes, fp, fnp, fsz, resolved_key)
@@ -677,7 +678,8 @@ def run_image_generation(
                 "updated_at": _now(),
             }).eq("id", content_item_id).execute()
 
-    return {**saved, "_prompt": image_prompt, "_provider": provider, "_size": size, "_source": "remix" if source_url else "generated"}
+    ideogram_prompt = fp if resolved_key and image_provider != "openai" else None
+    return {**saved, "_prompt": image_prompt, "_ideogram_prompt": ideogram_prompt, "_provider": provider, "_size": size, "_source": "remix" if source_url else "generated"}
 
 
 # ---------------------------------------------------------------------------
@@ -817,6 +819,7 @@ def run_banner_variants(
                     fp  = full_prompt_data.get("prompt", image_prompt)
                     fnp = full_prompt_data.get("negative_prompt", negative_prompt)
                     fsz = full_prompt_data.get("size", size)
+                    print(f"[image_agent] IDEOGRAM PROMPT [{style}] >>>\n{fp}\n<<<", flush=True)
                     if raw_source_bytes:
                         variant_bytes = _remix_ideogram(raw_source_bytes, fp, fnp, fsz, resolved_key)
                         prov = f"ideogram-remix-{style}"
