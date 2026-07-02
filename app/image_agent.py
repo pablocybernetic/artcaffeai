@@ -109,13 +109,16 @@ Output ONLY a JSON object — no markdown, no prose:
 
 PROMPT FORMAT that works well with Ideogram:
 
-  "[food description from source photo] as full-bleed background.
-   Semi-transparent dark overlay (40% opacity) across the entire image for text legibility.
+  "Source photo used as full-bleed background — do not alter or replace any food or objects.
+   Semi-transparent dark overlay ([X]% opacity) across the entire image for text legibility.
    Large bold white sans-serif text '[HEADLINE]' centred in the upper half of the image.
    Smaller white text '[CAPTION]' centred near the bottom.
-   [Optional: thin white rule separating headline from caption.]
+   [Optional: thin white horizontal rule separating headline from caption.]
    [Optional: small pill badge '[BADGE TEXT]' top-right corner.]
    Clean, minimal layout. No clutter."
+
+NEVER describe the food, dish, or any objects in the image.
+Describing food will cause Ideogram to regenerate a different dish — do NOT do this.
 
 Artcaffe brand voice: premium, warm, aspirational — Nairobi urban lifestyle.
 Colours if generating from scratch (no source photo): forest green #1B3A2A, cream #F5EBD5.
@@ -200,10 +203,11 @@ def _make_full_banner_prompt(
     parts += [
         "",
         f"Write the Ideogram prompt in the '{style_variant}' style. "
-        "The source photo will be supplied — do NOT describe new food or alter the dish. "
-        "Describe the food from the source briefly (e.g. 'artisan sourdough loaf on wooden board'), "
-        "then add: dark overlay opacity, headline text verbatim in large bold white sans-serif, "
-        "caption text smaller below, optional badge. Keep it clean and minimal.",
+        "IMPORTANT: do NOT describe or mention the food, dish, or any objects in the photo — "
+        "describing food causes Ideogram to replace it with a different dish. "
+        "Start with: 'Source photo used as full-bleed background — do not alter or replace any food or objects.' "
+        "Then add only: the overlay opacity for this style, the headline verbatim in large bold white sans-serif, "
+        "the caption in smaller white text, and optionally a badge. Keep it clean and minimal.",
     ]
     user_msg = "\n".join(p for p in parts if p is not None)
     resp = anthropic.messages.create(
