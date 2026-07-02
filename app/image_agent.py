@@ -91,12 +91,14 @@ Rules:
 """
 
 FULL_BANNER_SYSTEM = """\
-You are a senior graphic designer producing complete, print-ready marketing posters for
-Artcaffe Coffee & Restaurant — a premium café brand in Nairobi, Kenya.
+You are a senior art director writing prompts for Ideogram V2 to produce marketing banners
+for Artcaffe Coffee & Restaurant — a premium café brand in Nairobi, Kenya.
 
-An AI image generator (Ideogram or OpenAI gpt-image-1) will render the ENTIRE finished poster.
-Your job: write a single, highly detailed prompt that describes a GRAPHIC DESIGN — not a photograph.
-Think: professionally designed marketing flyer with layout zones, typography, icons, and a CTA.
+CRITICAL RULE when a source photo is supplied (remix mode):
+  - DO NOT alter, reimagine, or regenerate the food or product in the photo.
+  - The food/drink must stay exactly as photographed — same composition, same dish.
+  - Your job is to ADD text and a subtle dark overlay ON TOP of the photo.
+  - Never describe new food, new props, or a new scene.
 
 Output ONLY a JSON object — no markdown, no prose:
 {
@@ -105,55 +107,29 @@ Output ONLY a JSON object — no markdown, no prose:
   "size": "1080x1350"
 }
 
-PROMPT STRUCTURE — describe every element below:
+PROMPT FORMAT that works well with Ideogram:
 
-1. BACKGROUND
-   Flat colour panel, warm gradient, or lightly textured paper — use Artcaffe palette.
-   Examples: "forest-green (#1B3A2A) background", "warm cream (#F5EBD5) paper texture"
+  "[food description from source photo] as full-bleed background.
+   Semi-transparent dark overlay (40% opacity) across the entire image for text legibility.
+   Large bold white sans-serif text '[HEADLINE]' centred in the upper half of the image.
+   Smaller white text '[CAPTION]' centred near the bottom.
+   [Optional: thin white rule separating headline from caption.]
+   [Optional: small pill badge '[BADGE TEXT]' top-right corner.]
+   Clean, minimal layout. No clutter."
 
-2. PRODUCT PHOTO
-   The hero element — positioned clearly: centred hero, right-hand panel, or top-half inset.
-   Describe it vividly so the generator places it correctly.
-
-3. HEADLINE
-   Quote the exact text. State weight (black / bold / heavy), colour, size (dominant / large),
-   and position (upper third / centred / left panel).
-   Example: large bold white sans-serif text "WEEKEND PACK" in the upper-left
-
-4. SUBHEADING / CAPTION
-   Exact text, smaller than headline, colour, position beneath the headline.
-
-5. BULLET ROWS (if the caption lists features)
-   Describe as 2–4 icon + text rows: small green leaf icon followed by "Premium Meats", etc.
-
-6. CTA BUTTON
-   Always include one. Shape: pill or rounded rectangle. Colour, label quoted exactly.
-   Example: forest-green pill button labelled "ORDER NOW"
-
-7. BADGE / CALLOUT (optional)
-   Circular or ribbon badge with short bold text: "NEW", "LIMITED TIME", "PERFECT FOR X".
-   Position: top-right corner or overlapping the product photo.
-
-8. FOOTER STRIP
-   Thin strip at the bottom: website URL and/or a one-line tagline.
-
-9. DECORATIVE ACCENTS
-   Subtle brand touches: thin gold rule, small leaf motif, diagonal stripe, geometric frame.
-
-Artcaffe brand:
-  Colours: forest green #1B3A2A · warm cream #F5EBD5 · warm red #C0392B · muted gold
-  Typography personality: bold condensed display sans-serif for headlines, clean body
-  Tone: premium, warm, aspirational — Nairobi urban lifestyle
+Artcaffe brand voice: premium, warm, aspirational — Nairobi urban lifestyle.
+Colours if generating from scratch (no source photo): forest green #1B3A2A, cream #F5EBD5.
 
 SIZE: "1080x1350" (Instagram 4:5, DEFAULT) · "1024x1792" (Stories) · "1024x1024" (Square)
 
-Style variants — follow exactly:
-  editorial  → cream/white background, centred product hero, dark-green bold headline,
-               icon bullet rows, clean grid layout, minimal decoration
-  lifestyle  → split layout: left forest-green panel (white headline + icon rows + CTA pill),
-               right side shows the product photo; warm earthy tones
-  bold       → full-bleed dark-green or deep-red background, oversized cream/white headline
-               dominates upper half, product photo inset lower-right, high contrast badge
+Negative prompt should always include:
+  "altered food, regenerated dish, different meal, cartoon, illustration, watermark, blurry text,
+   illegible text, decorative fonts, script fonts, multiple conflicting styles"
+
+Style variants:
+  editorial  → light/cream dark overlay (30%), headline top-center, clean sans-serif
+  lifestyle  → warm dark overlay (45%), headline center, slightly more atmospheric
+  bold       → deep dark overlay (60%), oversized headline dominates, high contrast
 """
 
 
@@ -223,10 +199,11 @@ def _make_full_banner_prompt(
         parts += ["", brand_assets_ctx]
     parts += [
         "",
-        f"Design a complete marketing poster in the '{style_variant}' style. "
-        "Follow the PROMPT STRUCTURE: background, product photo placement, headline (verbatim), "
-        "subheading, bullet rows (if applicable), CTA button, optional badge, footer strip, accents. "
-        "The result must look like a professionally designed flyer — not a photograph.",
+        f"Write the Ideogram prompt in the '{style_variant}' style. "
+        "The source photo will be supplied — do NOT describe new food or alter the dish. "
+        "Describe the food from the source briefly (e.g. 'artisan sourdough loaf on wooden board'), "
+        "then add: dark overlay opacity, headline text verbatim in large bold white sans-serif, "
+        "caption text smaller below, optional badge. Keep it clean and minimal.",
     ]
     user_msg = "\n".join(p for p in parts if p is not None)
     resp = anthropic.messages.create(
@@ -347,11 +324,11 @@ def _remix_ideogram(
     negative_prompt: str,
     size: str,
     api_key: str,
-    image_weight: int = 70,
+    image_weight: int = 90,
 ) -> bytes:
     """
     Image-to-image remix via Ideogram V2 /remix.
-    image_weight: 0–100, higher = closer to the original photo (70 = good balance).
+    image_weight: 0–100, higher = closer to the original photo (90 = preserve product, add text only).
     Sends source image as multipart/form-data.
     """
     import io as _io
