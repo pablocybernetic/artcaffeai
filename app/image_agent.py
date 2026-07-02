@@ -602,36 +602,26 @@ def run_image_generation(
             print(f"[image_agent] OpenAI {provider} {len(image_bytes)//1024} KB", flush=True)
             # No PIL overlay — OpenAI rendered the complete poster
         else:
-            # ── Ideogram hybrid path: AI enhances the VISUAL, PIL renders text ────
-            # Ideogram hallucinates text glyphs, so we never ask it to render text.
-            # Instead: remix/generate the visual composition, then overlay clean text.
-            remix_data = _make_remix_prompt(
+            # ── Ideogram full-creative path: Ideogram renders everything ──────────
+            full_prompt_data = _make_full_banner_prompt(
                 anthropic,
                 brand_context=brand_context,
                 headline=headline,
                 caption=caption,
                 platform=platform,
                 brand_assets_ctx=brand_assets_text,
+                style_variant="editorial",
             )
-            fp  = remix_data.get("prompt", image_prompt)
-            fnp = remix_data.get("negative_prompt", negative_prompt)
-            fsz = remix_data.get("size", size)
+            fp  = full_prompt_data.get("prompt", image_prompt)
+            fnp = full_prompt_data.get("negative_prompt", negative_prompt)
+            fsz = full_prompt_data.get("size", size)
             if source_url:
-                source_bytes  = _download_image_url(source_url)
-                enhanced_bytes = _remix_ideogram(source_bytes, fp, fnp, fsz, resolved_key)
-                provider       = "ideogram-remix"
+                source_bytes = _download_image_url(source_url)
+                image_bytes  = _remix_ideogram(source_bytes, fp, fnp, fsz, resolved_key)
+                provider     = "ideogram-remix"
             else:
-                enhanced_bytes, provider = _generate_image(fp, fnp, fsz, resolved_key)
-            print(f"[image_agent] Ideogram {provider} visual {len(enhanced_bytes)//1024} KB", flush=True)
-            # PIL renders headline + caption on top of the AI-enhanced image
-            image_bytes = overlay_creative(
-                enhanced_bytes, headline, sb,
-                body_text=caption,
-                brand_color=brand_color,
-                anthropic=anthropic,
-                platform=platform,
-            )
-            provider = f"{provider}+overlay"
+                image_bytes, provider = _generate_image(fp, fnp, fsz, resolved_key)
+            print(f"[image_agent] Ideogram {provider} {len(image_bytes)//1024} KB", flush=True)
     else:
         # ── Overlay-only path — PIL templates applied to existing photo ─────────
         if not source_url:
@@ -809,40 +799,31 @@ def run_banner_variants(
                 raise RuntimeError(f"All OpenAI variants failed: {_first_ai_error}") from _first_ai_error
 
         else:
-            # ── Ideogram hybrid: enhance visual ONCE → 3 PIL overlay templates ────
-            # Ideogram can't reliably render exact text — PIL handles all typography.
-            remix_data = _make_remix_prompt(
-                anthropic,
-                brand_context=brand_context,
-                headline=headline,
-                caption=caption,
-                platform=platform,
-                brand_assets_ctx=brand_assets_text,
-            )
-            fp  = remix_data.get("prompt", image_prompt)
-            fnp = remix_data.get("negative_prompt", negative_prompt)
-            fsz = remix_data.get("size", size)
-
-            if source_url:
-                raw_source_bytes = _download_image_url(source_url)
-                enhanced_bytes = _remix_ideogram(raw_source_bytes, fp, fnp, fsz, resolved_key)
-                base_prov = "ideogram-remix"
-            else:
-                enhanced_bytes, base_prov = _generate_image(fp, fnp, fsz, resolved_key)
-            print(f"[image_agent] Ideogram visual {len(enhanced_bytes)//1024} KB → 3 overlays", flush=True)
+            # ── Ideogram full-creative: 3 style variants, Ideogram renders everything
+            raw_source_bytes: bytes | None = _download_image_url(source_url) if source_url else None
 
             _first_ai_error = None
-            for tmpl in _VARIANT_TEMPLATES:
+            for style in _IDEOGRAM_STYLES:
                 try:
-                    variant_bytes = overlay_creative(
-                        enhanced_bytes, headline, sb,
-                        body_text=caption,
-                        brand_color=brand_color,
-                        anthropic=anthropic,
+                    full_prompt_data = _make_full_banner_prompt(
+                        anthropic,
+                        brand_context=brand_context,
+                        headline=headline,
+                        caption=caption,
                         platform=platform,
-                        template_override=tmpl,
+                        brand_assets_ctx=brand_assets_text,
+                        style_variant=style,
                     )
-                    prov = f"{base_prov}+{tmpl}"
+                    fp  = full_prompt_data.get("prompt", image_prompt)
+                    fnp = full_prompt_data.get("negative_prompt", negative_prompt)
+                    fsz = full_prompt_data.get("size", size)
+                    if raw_source_bytes:
+                        variant_bytes = _remix_ideogram(raw_source_bytes, fp, fnp, fsz, resolved_key)
+                        prov = f"ideogram-remix-{style}"
+                    else:
+                        variant_bytes, _ = _generate_image(fp, fnp, fsz, resolved_key)
+                        prov = f"ideogram-generate-{style}"
+                    print(f"[image_agent] Ideogram variant {style} {len(variant_bytes)//1024} KB", flush=True)
                     bucket, storage_path, public_url = _upload_to_storage(sb, variant_bytes, concept_id)
                     filename = storage_path.split("/")[-1]
                     asset_row = {
@@ -858,15 +839,14 @@ def run_banner_variants(
                     }
                     insert_res = sb.table("assets").insert(asset_row).execute()
                     saved = insert_res.data[0] if insert_res.data else asset_row
-                    saved_assets.append({**saved, "_template": tmpl, "_provider": prov})
-                    print(f"[image_agent] Ideogram hybrid {tmpl} uploaded", flush=True)
+                    saved_assets.append({**saved, "_style": style, "_provider": prov})
                 except Exception as exc:
-                    print(f"[image_agent] Ideogram hybrid {tmpl} failed: {exc}", flush=True)
+                    print(f"[image_agent] Ideogram variant {style} failed: {exc}", flush=True)
                     if _first_ai_error is None:
                         _first_ai_error = exc
 
             if not saved_assets and _first_ai_error is not None:
-                raise RuntimeError(f"All Ideogram hybrid variants failed: {_first_ai_error}") from _first_ai_error
+                raise RuntimeError(f"All Ideogram variants failed: {_first_ai_error}") from _first_ai_error
 
     else:
         # ── Overlay-only path: 3 PIL templates on existing photo ──────────────
