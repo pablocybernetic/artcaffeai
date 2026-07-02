@@ -34,8 +34,11 @@ from supabase import Client, create_client
 from publishers.meta_publisher import (
     post_instagram,
     post_instagram_reel,
+    post_instagram_story,
     get_instagram_post_insights,
     post_facebook,
+    post_facebook_story,
+    post_facebook_reel,
     test_credentials as test_meta,
 )
 from publishers.linkedin_publisher import (
@@ -120,6 +123,7 @@ def _execute_publish(
     content_item_id: str,
     platforms: list[str],
     anthropic: Optional[Any] = None,
+    platform_types: Optional[dict] = None,
 ) -> dict:
     """
     Core publish logic shared by the REST endpoint and the job_runner.
@@ -174,7 +178,22 @@ def _execute_publish(
         today=date.today(),
     )
 
+    _platform_types: dict = platform_types or {}
     results: dict[str, Any] = {}
+
+    # Resolve video asset once — reused for reel publishing
+    video_url: Optional[str] = None
+    if item.get("asset_ids"):
+        vid_res = (
+            sb_client.table("assets")
+            .select("public_url")
+            .in_("id", item["asset_ids"])
+            .eq("asset_type", "video")
+            .limit(1)
+            .execute()
+        )
+        if vid_res is not None and vid_res.data:
+            video_url = vid_res.data[0].get("public_url")
 
     for platform in platforms:
         try:
@@ -182,6 +201,7 @@ def _execute_publish(
             opt_caption = optimised["caption"]
             opt_hashtags = optimised["hashtags"]
             hashtag_str = " ".join(opt_hashtags)
+            content_type = _platform_types.get(platform, "post")
 
             if platform == "instagram":
                 creds = _get_creds("meta", sb_client)
@@ -191,42 +211,27 @@ def _execute_publish(
                     raise RuntimeError("Instagram User ID missing — add it in Settings → Meta credentials")
                 if not creds.get("access_token"):
                     raise RuntimeError("Meta access token missing — add it in Settings → Meta credentials")
-                if not image_url:
-                    raise RuntimeError("Instagram requires an image — generate a banner first")
 
-                text = f"{headline}\n\n{opt_caption}" + (f"\n\n{hashtag_str}" if hashtag_str else "")
                 ig_id = creds["ig_user_id"]
                 token = creds["access_token"]
+                text = f"{headline}\n\n{opt_caption}" + (f"\n\n{hashtag_str}" if hashtag_str else "")
 
-                # Use Reels publisher for video assets, photo publisher otherwise
-                video_url: Optional[str] = None
-                if item.get("asset_ids"):
-                    vid_res = (
-                        sb_client.table("assets")
-                        .select("public_url")
-                        .in_("id", item["asset_ids"])
-                        .eq("asset_type", "video")
-                        .limit(1)
-                        .execute()
-                    )
-                    if vid_res is not None and vid_res.data:
-                        video_url = vid_res.data[0].get("public_url")
-
-                if video_url:
+                if content_type == "story":
+                    if not image_url:
+                        raise RuntimeError("Instagram Stories require an image — generate a banner first")
+                    r = post_instagram_story(ig_user_id=ig_id, access_token=token, image_url=image_url)
+                elif content_type == "reel":
+                    if not video_url:
+                        raise RuntimeError("Instagram Reels require a video asset — generate a video first")
                     r = post_instagram_reel(
-                        ig_user_id=ig_id,
-                        access_token=token,
-                        video_url=video_url,
-                        caption=text,
-                        cover_url=image_url,
+                        ig_user_id=ig_id, access_token=token,
+                        video_url=video_url, caption=text, cover_url=image_url,
                     )
-                else:
-                    r = post_instagram(
-                        ig_user_id=ig_id,
-                        access_token=token,
-                        image_url=image_url,
-                        caption=text,
-                    )
+                else:  # post (default)
+                    if not image_url:
+                        raise RuntimeError("Instagram requires an image — generate a banner first")
+                    r = post_instagram(ig_user_id=ig_id, access_token=token, image_url=image_url, caption=text)
+
                 _save_publish_result(sb_client=sb_client, content_item_id=content_item_id, concept_id=concept_id, platform=platform, result=r)
                 results[platform] = {"ok": True, **r}
 
@@ -239,12 +244,18 @@ def _execute_publish(
                 if not creds.get("access_token"):
                     raise RuntimeError("Meta access token missing — edit Meta credentials in Settings")
                 text = f"{headline}\n\n{opt_caption}" + (f"\n\n{hashtag_str}" if hashtag_str else "")
-                r = post_facebook(
-                    page_id=creds["page_id"],
-                    access_token=creds["access_token"],
-                    message=text,
-                    image_url=image_url,
-                )
+
+                if content_type == "story":
+                    if not image_url:
+                        raise RuntimeError("Facebook Stories require an image — generate a banner first")
+                    r = post_facebook_story(page_id=creds["page_id"], access_token=creds["access_token"], image_url=image_url)
+                elif content_type == "reel":
+                    if not video_url:
+                        raise RuntimeError("Facebook Reels require a video asset — generate a video first")
+                    r = post_facebook_reel(page_id=creds["page_id"], access_token=creds["access_token"], video_url=video_url, caption=text)
+                else:  # post (default)
+                    r = post_facebook(page_id=creds["page_id"], access_token=creds["access_token"], message=text, image_url=image_url)
+
                 _save_publish_result(sb_client=sb_client, content_item_id=content_item_id, concept_id=concept_id, platform=platform, result=r)
                 results[platform] = {"ok": True, **r}
 
@@ -372,7 +383,8 @@ def _execute_publish(
 
 class PublishRequest(BaseModel):
     content_item_id: str
-    platforms: list[str]          # e.g. ["instagram", "facebook", "linkedin", "google_ads"]
+    platforms: list[str]                    # e.g. ["instagram", "facebook"]
+    platform_types: dict = {}               # e.g. {"instagram": "story", "facebook": "reel"}
 
 
 class CredentialsSaveRequest(BaseModel):
@@ -410,7 +422,11 @@ def publish_post(req: PublishRequest):
     try:
         from anthropic import Anthropic  # noqa: PLC0415
         anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY")) if os.environ.get("ANTHROPIC_API_KEY") else None
-        return _execute_publish(sb, req.content_item_id, req.platforms, anthropic=anthropic_client)
+        return _execute_publish(
+            sb, req.content_item_id, req.platforms,
+            anthropic=anthropic_client,
+            platform_types=req.platform_types,
+        )
     except RuntimeError as e:
         raise HTTPException(404, str(e))
 

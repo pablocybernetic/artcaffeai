@@ -206,6 +206,134 @@ def post_facebook(
     }
 
 
+def post_instagram_story(
+    *,
+    ig_user_id: str,
+    access_token: str,
+    image_url: str,
+) -> dict:
+    """
+    Publish an image as an ephemeral Instagram Story (disappears after 24h).
+    Stories do not support captions via the Graph API.
+    """
+    with httpx.Client(timeout=45.0) as c:
+        r1 = c.post(
+            f"{GRAPH}/{ig_user_id}/media",
+            params={
+                "image_url": image_url,
+                "media_type": "STORIES",
+                "access_token": access_token,
+            },
+        )
+        creation_id = _handle(r1, "create story container")["id"]
+        _wait_for_container(creation_id, access_token, c)
+
+        r2 = c.post(
+            f"{GRAPH}/{ig_user_id}/media_publish",
+            params={"creation_id": creation_id, "access_token": access_token},
+        )
+        post_id = _handle(r2, "publish story")["id"]
+
+    return {
+        "platform": "instagram",
+        "post_id": post_id,
+        "post_url": f"https://www.instagram.com/stories/{ig_user_id}/{post_id}/",
+        "media_type": "story",
+    }
+
+
+def post_facebook_story(
+    *,
+    page_id: str,
+    access_token: str,
+    image_url: str,
+) -> dict:
+    """
+    Publish a photo as an ephemeral Facebook Story (disappears after 24h).
+    Uses the /photo_stories endpoint.
+    """
+    with httpx.Client(timeout=45.0) as c:
+        page_token = _page_token(page_id, access_token, c)
+        r = c.post(
+            f"{GRAPH}/{page_id}/photo_stories",
+            params={
+                "url": image_url,
+                "access_token": page_token,
+            },
+        )
+        data = _handle(r, "facebook photo story")
+
+    story_id = data.get("id", "")
+    return {
+        "platform": "facebook",
+        "post_id": story_id,
+        "post_url": f"https://www.facebook.com/stories/{story_id}",
+        "media_type": "story",
+    }
+
+
+def post_facebook_reel(
+    *,
+    page_id: str,
+    access_token: str,
+    video_url: str,
+    caption: str,
+) -> dict:
+    """
+    Publish a video as a Facebook Reel.
+    video_url must be a publicly accessible MP4 URL.
+    Three-step process: init upload → upload bytes → finish & publish.
+    """
+    with httpx.Client(timeout=120.0) as c:
+        page_token = _page_token(page_id, access_token, c)
+
+        # Step 1 — initialise the reel upload session
+        r1 = c.post(
+            f"{GRAPH}/{page_id}/video_reels",
+            params={"upload_phase": "start", "access_token": page_token},
+        )
+        init_data = _handle(r1, "init reel upload")
+        video_id = init_data["video_id"]
+        upload_url = init_data["upload_url"]
+
+        # Step 2 — download video and PUT to the upload URL
+        vid = c.get(video_url, follow_redirects=True, timeout=60.0)
+        if not vid.is_success:
+            raise RuntimeError(f"Could not fetch video for reel upload: {vid.status_code}")
+        upload_r = c.put(
+            upload_url,
+            content=vid.content,
+            headers={
+                "Authorization": f"OAuth {page_token}",
+                "offset": "0",
+                "file_size": str(len(vid.content)),
+            },
+            timeout=120.0,
+        )
+        if not upload_r.is_success:
+            raise RuntimeError(f"Reel video upload failed: {upload_r.status_code} — {upload_r.text[:200]}")
+
+        # Step 3 — finish and publish
+        r3 = c.post(
+            f"{GRAPH}/{page_id}/video_reels",
+            params={
+                "video_id": video_id,
+                "upload_phase": "finish",
+                "video_state": "PUBLISHED",
+                "description": caption,
+                "access_token": page_token,
+            },
+        )
+        _handle(r3, "finish reel upload")
+
+    return {
+        "platform": "facebook",
+        "post_id": video_id,
+        "post_url": f"https://www.facebook.com/reel/{video_id}",
+        "media_type": "reel",
+    }
+
+
 def test_credentials(*, access_token: str, page_id: str) -> dict:
     """Verify token and page access."""
     with httpx.Client(timeout=15.0) as c:
