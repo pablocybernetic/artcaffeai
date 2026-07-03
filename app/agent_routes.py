@@ -405,6 +405,29 @@ def trigger_master_agent(bg: BackgroundTasks):
     return {"ok": True, "status": "queued", "message": "Master Agent cycle started in background"}
 
 
+@router.get("/master/scheduler")
+def get_scheduler_status():
+    """Return current Master Agent scheduler state (interval, enabled, next/last run)."""
+    from master_scheduler import get_state  # noqa: PLC0415
+    return {"ok": True, "data": get_state()}
+
+
+class SchedulerUpdate(BaseModel):
+    interval_minutes: Optional[int] = None
+    enabled: Optional[bool] = None
+
+
+@router.post("/master/scheduler")
+def update_scheduler(body: SchedulerUpdate):
+    """Update the cron interval and/or enabled flag for the Master Agent scheduler."""
+    from master_scheduler import set_interval, set_enabled, get_state  # noqa: PLC0415
+    if body.interval_minutes is not None:
+        set_interval(body.interval_minutes)
+    if body.enabled is not None:
+        set_enabled(body.enabled)
+    return {"ok": True, "data": get_state()}
+
+
 @router.get("/master/status")
 def get_master_status():
     """

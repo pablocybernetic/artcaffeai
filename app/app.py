@@ -45,6 +45,8 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
+from contextlib import asynccontextmanager
+
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -58,6 +60,7 @@ from font_routes import router as font_router
 from budget_routes import router as budget_router
 from ads_routes import router as ads_router
 from brand_assets_routes import router as brand_assets_router
+import master_scheduler
 
 # ---------------------------------------------------------------------------
 # Config
@@ -69,7 +72,16 @@ API_KEY = os.environ.get("FASTAPI_API_KEY")
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",")]
 
 sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-app = FastAPI(title="Artcaffe Brand API", version="2.0")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await master_scheduler.start(sb)
+    yield
+    await master_scheduler.stop()
+
+
+app = FastAPI(title="Artcaffe Brand API", version="2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
