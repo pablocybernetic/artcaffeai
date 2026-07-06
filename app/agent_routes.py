@@ -119,6 +119,8 @@ class SchedulePublishRequest(BaseModel):
     brief_id: str
     platforms: list[str]
     publish_at: str  # ISO 8601 UTC timestamp, e.g. "2026-06-10T09:00:00Z"
+    content_item_id: Optional[str] = None
+    platform_types: dict = {}
 
 
 # ---------------------------------------------------------------------------
@@ -334,22 +336,29 @@ def schedule_publish(req: SchedulePublishRequest):
     Approve a brief and schedule its content for publishing at a future time.
     The job_runner poller will fire it once publish_at is reached.
     """
-    item_res = (
-        sb.table("content_items")
-        .select("id")
-        .eq("brief_id", req.brief_id)
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-    )
+    from publishing_routes import _parse_publish_at, _sync_calendar_entries  # noqa: PLC0415
+
+    publish_at = _parse_publish_at(req.publish_at)
+
+    item_query = sb.table("content_items").select("id").eq("brief_id", req.brief_id)
+    if req.content_item_id:
+        item_query = item_query.eq("id", req.content_item_id)
+    item_res = item_query.order("created_at", desc=True).limit(1).execute()
     if not item_res.data:
         raise HTTPException(404, f"No content items found for brief: {req.brief_id}")
     content_item_id = item_res.data[0]["id"]
 
-    brief_res = sb.table("content_briefs").select("concept_id").eq("id", req.brief_id).single().execute()
+    brief_res = (
+        sb.table("content_briefs")
+        .select("id,concept_id,format,created_by")
+        .eq("id", req.brief_id)
+        .single()
+        .execute()
+    )
     if not brief_res.data:
         raise HTTPException(404, f"Brief not found: {req.brief_id}")
-    concept_id: str = brief_res.data["concept_id"]
+    brief = brief_res.data
+    concept_id: str = brief["concept_id"]
 
     job_id = _create_job(
         agent_type="scheduled_publish",
@@ -357,23 +366,33 @@ def schedule_publish(req: SchedulePublishRequest):
         payload={
             "content_item_id": content_item_id,
             "platforms": req.platforms,
+            "platform_types": req.platform_types,
             "brief_id": req.brief_id,
-            "publish_at": req.publish_at,
+            "publish_at": publish_at,
         },
     )
 
     # Store scheduled_at on the content item so the calendar can display it
     sb.table("content_items").update({
-        "scheduled_at": req.publish_at,
+        "scheduled_at": publish_at,
         "updated_at": _now(),
     }).eq("id", content_item_id).execute()
+
+    calendar_entries = _sync_calendar_entries(
+        sb_client=sb,
+        content_item_id=content_item_id,
+        brief=brief,
+        platforms=req.platforms,
+        publish_at=publish_at,
+    )
 
     return {
         "ok": True,
         "job_id": job_id,
         "content_item_id": content_item_id,
-        "publish_at": req.publish_at,
+        "publish_at": publish_at,
         "status": "scheduled",
+        "calendar_entries": calendar_entries,
     }
 
 

@@ -182,6 +182,7 @@ CREATE TABLE public.content_items (
   metadata jsonb DEFAULT '{}'::jsonb,
   version integer NOT NULL DEFAULT 1,
   status text NOT NULL DEFAULT 'draft'::text CHECK (status = ANY (ARRAY['draft'::text, 'pending_review'::text, 'approved'::text, 'rejected'::text])),
+  scheduled_at timestamp with time zone,
   asset_ids ARRAY DEFAULT '{}'::uuid[],
   created_at timestamp with time zone DEFAULT now(),
   updated_at timestamp with time zone DEFAULT now(),

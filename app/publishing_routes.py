@@ -24,6 +24,7 @@ Supported platforms:
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import date, datetime, timezone
 from typing import Any, Optional
 
@@ -116,6 +117,119 @@ def _save_publish_result(
         "published_at": _now(),
         "created_at": _now(),
     }).execute()
+
+
+def _parse_publish_at(value: str) -> str:
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="publish_at must be an ISO 8601 timestamp") from exc
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(timezone.utc)
+
+    if dt <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="publish_at must be in the future")
+
+    return dt.isoformat()
+
+
+def _create_scheduled_publish_job(
+    *,
+    sb_client: Client,
+    concept_id: str,
+    content_item_id: str,
+    brief_id: str,
+    platforms: list[str],
+    publish_at: str,
+    platform_types: Optional[dict] = None,
+) -> str:
+    job_id = str(uuid.uuid4())
+    sb_client.table("jobs").insert({
+        "id": job_id,
+        "concept_id": concept_id,
+        "agent_type": "scheduled_publish",
+        "status": "pending",
+        "input_payload": {
+            "content_item_id": content_item_id,
+            "platforms": platforms,
+            "platform_types": platform_types or {},
+            "brief_id": brief_id,
+            "publish_at": publish_at,
+        },
+        "created_at": _now(),
+        "updated_at": _now(),
+    }).execute()
+    return job_id
+
+
+CALENDAR_PLATFORM_BY_PUBLISHER = {
+    "instagram": "instagram_organic",
+    "facebook": "meta_ads",
+    "linkedin": "linkedin_organic",
+    "google_ads": "google_ads",
+}
+
+
+def _sync_calendar_entries(
+    *,
+    sb_client: Client,
+    content_item_id: str,
+    brief: dict[str, Any],
+    platforms: list[str],
+    publish_at: str,
+) -> list[dict[str, Any]]:
+    existing_res = (
+        sb_client.table("calendar_entries")
+        .select("id,platform")
+        .eq("content_item_id", content_item_id)
+        .execute()
+    )
+    existing_by_platform = {
+        row["platform"]: row["id"]
+        for row in (existing_res.data or [])
+        if row.get("platform") and row.get("id")
+    }
+
+    touched: list[dict[str, Any]] = []
+    for publisher_platform in platforms:
+        calendar_platform = CALENDAR_PLATFORM_BY_PUBLISHER.get(publisher_platform)
+        if not calendar_platform:
+            continue
+
+        row = {
+            "concept_id": brief["concept_id"],
+            "brief_id": brief["id"],
+            "content_item_id": content_item_id,
+            "platform": calendar_platform,
+            "format": brief.get("format") or "feed_post",
+            "scheduled_at": publish_at,
+            "content_status": "approved",
+            "updated_at": _now(),
+        }
+
+        existing_id = existing_by_platform.get(calendar_platform)
+        if existing_id:
+            res = (
+                sb_client.table("calendar_entries")
+                .update(row)
+                .eq("id", existing_id)
+                .execute()
+            )
+        else:
+            res = (
+                sb_client.table("calendar_entries")
+                .insert({
+                    **row,
+                    "created_by": brief.get("created_by"),
+                    "created_at": _now(),
+                })
+                .execute()
+            )
+        touched.extend(res.data or [])
+
+    return touched
 
 
 def _execute_publish(
@@ -373,6 +487,11 @@ def _execute_publish(
     if all_ok:
         sb_client.table("content_items").update({"status": "approved", "updated_at": _now()}).eq("id", content_item_id).execute()
         sb_client.table("content_briefs").update({"stage": "published", "updated_at": _now()}).eq("id", item["brief_id"]).execute()
+        sb_client.table("calendar_entries").update({
+            "content_status": "published",
+            "published_at": _now(),
+            "updated_at": _now(),
+        }).eq("content_item_id", content_item_id).execute()
 
     return {"ok": all_ok, "results": results}
 
@@ -385,6 +504,10 @@ class PublishRequest(BaseModel):
     content_item_id: str
     platforms: list[str]                    # e.g. ["instagram", "facebook"]
     platform_types: dict = {}               # e.g. {"instagram": "story", "facebook": "reel"}
+
+
+class SchedulePublishRequest(PublishRequest):
+    publish_at: str
 
 
 class CredentialsSaveRequest(BaseModel):
@@ -429,6 +552,69 @@ def publish_post(req: PublishRequest):
         )
     except RuntimeError as e:
         raise HTTPException(404, str(e))
+
+
+@router.post("/schedule")
+def schedule_post(req: SchedulePublishRequest):
+    """
+    Schedule a content item to publish later and place it on the marketing calendar.
+    The job_runner poller will execute it once publish_at is reached.
+    """
+    publish_at = _parse_publish_at(req.publish_at)
+
+    item_res = (
+        sb.table("content_items")
+        .select("id,brief_id")
+        .eq("id", req.content_item_id)
+        .single()
+        .execute()
+    )
+    if item_res is None or not item_res.data:
+        raise HTTPException(404, f"Content item not found: {req.content_item_id}")
+    item = item_res.data
+
+    brief_res = (
+        sb.table("content_briefs")
+        .select("id,concept_id,format,created_by")
+        .eq("id", item["brief_id"])
+        .single()
+        .execute()
+    )
+    if brief_res is None or not brief_res.data:
+        raise HTTPException(404, f"Brief not found: {item['brief_id']}")
+    brief = brief_res.data
+
+    job_id = _create_scheduled_publish_job(
+        sb_client=sb,
+        concept_id=brief["concept_id"],
+        content_item_id=req.content_item_id,
+        brief_id=item["brief_id"],
+        platforms=req.platforms,
+        publish_at=publish_at,
+        platform_types=req.platform_types,
+    )
+
+    sb.table("content_items").update({
+        "scheduled_at": publish_at,
+        "updated_at": _now(),
+    }).eq("id", req.content_item_id).execute()
+
+    calendar_entries = _sync_calendar_entries(
+        sb_client=sb,
+        content_item_id=req.content_item_id,
+        brief=brief,
+        platforms=req.platforms,
+        publish_at=publish_at,
+    )
+
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "content_item_id": req.content_item_id,
+        "publish_at": publish_at,
+        "status": "scheduled",
+        "calendar_entries": calendar_entries,
+    }
 
 
 @router.get("/credentials")

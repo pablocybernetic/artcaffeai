@@ -43,6 +43,25 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_iso_datetime(value: str) -> Optional[datetime]:
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _is_publish_due(publish_at: Optional[str]) -> bool:
+    if not publish_at:
+        return True
+    dt = _parse_iso_datetime(publish_at)
+    if dt is None:
+        return True
+    return dt <= datetime.now(timezone.utc)
+
+
 def _mark_running(job_id: str) -> None:
     sb.table("jobs").update({
         "status": "running",
@@ -291,6 +310,7 @@ def run_job(job_id: str) -> dict:
 
             content_item_id = payload.get("content_item_id")
             platforms = payload.get("platforms") or []
+            platform_types = payload.get("platform_types") or {}
             brief_id = payload.get("brief_id")
 
             if not content_item_id:
@@ -298,7 +318,13 @@ def run_job(job_id: str) -> dict:
             if not platforms:
                 raise RuntimeError("No platforms in job payload")
 
-            result = _execute_publish(sb, content_item_id, platforms, anthropic=anthropic_client)
+            result = _execute_publish(
+                sb,
+                content_item_id,
+                platforms,
+                anthropic=anthropic_client,
+                platform_types=platform_types,
+            )
 
             # Mark brief as approved if not already
             if brief_id:
@@ -314,6 +340,7 @@ def run_job(job_id: str) -> dict:
             result_dict = {
                 "content_item_id": content_item_id,
                 "platforms": platforms,
+                "platform_types": platform_types,
                 "publish_results": result,
             }
             _mark_succeeded(job_id, result_dict)
@@ -399,7 +426,6 @@ def run_job(job_id: str) -> dict:
 # Standalone poller (systemd worker mode)
 # ---------------------------------------------------------------------------
 def _claim_next_pending() -> Optional[dict]:
-    now_iso = _now()
     res = (
         sb.table("jobs")
         .select("id,agent_type,input_payload")
@@ -412,7 +438,7 @@ def _claim_next_pending() -> Optional[dict]:
     for row in (res.data or []):
         if row.get("agent_type") == "scheduled_publish":
             publish_at = (row.get("input_payload") or {}).get("publish_at")
-            if publish_at and publish_at > now_iso:
+            if not _is_publish_due(publish_at):
                 continue  # not yet due
         return {"id": row["id"]}
     return None
