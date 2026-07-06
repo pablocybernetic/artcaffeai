@@ -260,9 +260,11 @@ def _execute_publish(
         raise RuntimeError(f"Content item not found: {content_item_id}")
     item: dict[str, Any] = item_res.data
 
-    # Fetch concept_id from brief
-    brief_res = sb_client.table("content_briefs").select("concept_id").eq("id", item["brief_id"]).single().execute()
-    concept_id: Optional[str] = (brief_res.data or {}).get("concept_id") if brief_res is not None else None
+    # Fetch concept_id and title from brief
+    brief_res = sb_client.table("content_briefs").select("concept_id,content_angle,hook").eq("id", item["brief_id"]).single().execute()
+    _brief_data: dict = (brief_res.data or {}) if brief_res is not None else {}
+    concept_id: Optional[str] = _brief_data.get("concept_id")
+    _post_title: str = item.get("headline") or _brief_data.get("content_angle") or _brief_data.get("hook") or "Untitled"
 
     # Resolve first asset image URL
     image_url: Optional[str] = None
@@ -493,6 +495,20 @@ def _execute_publish(
             "updated_at": _now(),
         }).eq("content_item_id", content_item_id).execute()
 
+    # Email notification for any publish attempt (success or partial failure)
+    try:
+        from notification_service import notify_post_published  # noqa: PLC0415
+        notify_post_published(
+            sb_client,
+            title=_post_title,
+            results=results,
+            platform_types=platform_types or {},
+            brief_id=item.get("brief_id"),
+            content_item_id=content_item_id,
+        )
+    except Exception as _e:
+        print(f"[publishing_routes] publish email failed: {_e}", flush=True)
+
     return {"ok": all_ok, "results": results}
 
 
@@ -575,7 +591,7 @@ def schedule_post(req: SchedulePublishRequest):
 
     brief_res = (
         sb.table("content_briefs")
-        .select("id,concept_id,format,created_by")
+        .select("id,concept_id,format,created_by,content_angle,hook")
         .eq("id", item["brief_id"])
         .single()
         .execute()
@@ -606,6 +622,22 @@ def schedule_post(req: SchedulePublishRequest):
         platforms=req.platforms,
         publish_at=publish_at,
     )
+
+    # Email confirmation
+    try:
+        from notification_service import notify_post_scheduled  # noqa: PLC0415
+        post_title = brief.get("content_angle") or brief.get("hook") or "Untitled"
+        notify_post_scheduled(
+            sb,
+            title=post_title,
+            platforms=req.platforms,
+            publish_at=publish_at,
+            platform_types=req.platform_types,
+            brief_id=item["brief_id"],
+            content_item_id=req.content_item_id,
+        )
+    except Exception as _e:
+        print(f"[publishing_routes] schedule email failed: {_e}", flush=True)
 
     return {
         "ok": True,

@@ -350,7 +350,7 @@ def schedule_publish(req: SchedulePublishRequest):
 
     brief_res = (
         sb.table("content_briefs")
-        .select("id,concept_id,format,created_by")
+        .select("id,concept_id,format,created_by,content_angle,hook")
         .eq("id", req.brief_id)
         .single()
         .execute()
@@ -385,6 +385,22 @@ def schedule_publish(req: SchedulePublishRequest):
         platforms=req.platforms,
         publish_at=publish_at,
     )
+
+    # Email confirmation
+    try:
+        from notification_service import notify_post_scheduled  # noqa: PLC0415
+        post_title = brief.get("content_angle") or brief.get("hook") or "Untitled"
+        notify_post_scheduled(
+            sb,
+            title=post_title,
+            platforms=req.platforms,
+            publish_at=publish_at,
+            platform_types=req.platform_types,
+            brief_id=req.brief_id,
+            content_item_id=content_item_id,
+        )
+    except Exception as _e:
+        print(f"[agent_routes] schedule email failed: {_e}", flush=True)
 
     return {
         "ok": True,
