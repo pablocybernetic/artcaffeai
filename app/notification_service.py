@@ -371,7 +371,7 @@ def notify_post_scheduled(
     return send_notification(
         sb,
         type="post_scheduled",
-        subject=f"Artcaffe — Scheduled: "{title}"",
+        subject=f'Artcaffe — Scheduled: "{title}"',
         html=html,
         payload={
             "title": title,
@@ -416,9 +416,9 @@ def notify_post_published(
 
     successful = [p for p, r in results.items() if r.get("ok")]
     subject = (
-        f"Artcaffe — Published: "{title}""
+        f'Artcaffe — Published: "{title}"'
         if successful else
-        f"Artcaffe — Publish failed: "{title}""
+        f'Artcaffe — Publish failed: "{title}"'
     )
 
     html = f"""
