@@ -93,6 +93,7 @@ class BannerRequest(BaseModel):
     image_api_key: str = ""       # provider API key from frontend Settings — overrides env var
     image_provider: str = "ideogram"  # "ideogram" | "openai"
     generate_variants: bool = False  # when True: generate bar + split + solid variants
+    custom_system_prompt: str = ""   # admin-editable override for OPENAI_BANNER_SYSTEM
 
 
 class AnalyzeAssetRequest(BaseModel):
@@ -631,6 +632,7 @@ def generate_banner(req: BannerRequest):
                 platform=req.platform,
                 image_api_key=req.image_api_key,
                 image_provider=req.image_provider,
+                custom_system_prompt=req.custom_system_prompt,
             )
             if assets:
                 return {"ok": True, "assets": assets, "asset": assets[0], "mode": "variants"}
@@ -676,6 +678,7 @@ def generate_banner(req: BannerRequest):
             platform=req.platform,
             image_api_key=req.image_api_key,
             image_provider=req.image_provider,
+            custom_system_prompt=req.custom_system_prompt,
         )
         return {"ok": True, "asset": asset, "mode": "generated"}
     except RuntimeError as e:

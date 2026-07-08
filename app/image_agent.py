@@ -246,6 +246,7 @@ def _make_full_banner_prompt(
     brand_assets_ctx: str = "",
     style_variant: str = "editorial",
     provider: str = "ideogram",
+    custom_system_prompt: str = "",
 ) -> dict:
     """
     Ask Claude to write a banner prompt for the given provider.
@@ -266,7 +267,7 @@ def _make_full_banner_prompt(
     platform_spec = _PLATFORM_SPEC.get(platform, "Instagram Feed 1080×1350")
 
     if provider == "openai":
-        system = OPENAI_BANNER_SYSTEM
+        system = custom_system_prompt.strip() or OPENAI_BANNER_SYSTEM
         user_msg = f"""\
 Create a premium editorial-style social media banner.
 
@@ -619,6 +620,7 @@ def run_image_generation(
     platform: str = "instagram",
     image_api_key: str = "",
     image_provider: str = "ideogram",
+    custom_system_prompt: str = "",
 ) -> dict:
     """
     Generate a banner image and save it as an asset.
@@ -678,6 +680,7 @@ def run_image_generation(
                 brand_assets_ctx=brand_assets_text,
                 style_variant="editorial",
                 provider="openai",
+                custom_system_prompt=custom_system_prompt,
             )
             fp  = full_prompt_data.get("prompt", image_prompt)
             fsz = full_prompt_data.get("size", size)
@@ -791,6 +794,7 @@ def run_banner_variants(
     platform: str = "instagram",
     image_api_key: str = "",
     image_provider: str = "ideogram",
+    custom_system_prompt: str = "",
 ) -> list[dict]:
     """
     Generate 3 banner variants (bar / split / solid) from the same source image.
@@ -857,6 +861,7 @@ def run_banner_variants(
                         brand_assets_ctx=brand_assets_text,
                         style_variant=style,
                         provider="openai",
+                        custom_system_prompt=custom_system_prompt,
                     )
                     fp  = full_prompt_data.get("prompt", image_prompt)
                     fsz = full_prompt_data.get("size", size)
