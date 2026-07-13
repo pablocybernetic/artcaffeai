@@ -145,3 +145,52 @@ def sync_google_ads_endpoint(req: AdsSyncRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Google Ads sync failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Meta Organic (Instagram + Facebook Page insights) sync
+# ---------------------------------------------------------------------------
+@router.post("/meta/organic/sync")
+def sync_meta_organic_endpoint(req: AdsSyncRequest):
+    """Pull Instagram Business organic metrics and store as a platform_data_snapshot."""
+    from connectors.meta_organic_connector import sync_meta_organic  # noqa: PLC0415
+
+    creds = _get_creds("meta")
+    access_token = creds.get("access_token")
+    instagram_account_id = creds.get("instagram_account_id")
+    page_id = creds.get("page_id", "")
+
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Meta access_token not configured — add it in Settings → Social publishing")
+    if not instagram_account_id:
+        raise HTTPException(status_code=400, detail="Instagram Account ID not configured — add it in Settings → Social publishing → Instagram & Facebook")
+
+    try:
+        summary = sync_meta_organic(
+            sb=sb,
+            concept_id=req.concept_id,
+            access_token=access_token,
+            instagram_account_id=instagram_account_id,
+            page_id=page_id,
+            date_range_days=req.date_range_days,
+        )
+        ig = summary.get("instagram", {})
+        totals = ig.get("totals", {})
+        return {
+            "ok": True,
+            "platform": "meta_organic",
+            "concept_id": req.concept_id,
+            "snapshot": {
+                "followers": totals.get("followers"),
+                "posts_in_range": totals.get("posts_in_range"),
+                "likes": totals.get("likes"),
+                "comments": totals.get("comments"),
+                "reach": totals.get("reach"),
+                "engagement_rate_pct": totals.get("engagement_rate_pct"),
+                "range": summary["range"],
+            },
+        }
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Meta organic sync failed: {e}")
