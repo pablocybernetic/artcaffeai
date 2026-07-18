@@ -107,7 +107,7 @@ def _scan_pipeline(sb: Client) -> dict:
     now = _now()
 
     # --- Concepts ---
-    concepts_res = sb.table("brand_concepts").select("id,name,slug").execute()
+    concepts_res = sb.table("concepts").select("id,name,key").execute()
     concepts = {c["id"]: c["name"] for c in (concepts_res.data or [])}
 
     # --- Jobs (last 7 days, all non-succeeded/non-skipped) ---
