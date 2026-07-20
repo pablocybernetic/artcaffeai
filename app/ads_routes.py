@@ -40,16 +40,18 @@ router = APIRouter(
 
 
 def _get_creds(platform: str) -> dict:
+    """Return the credential row as a flat dict (top-level columns, not credentials_json)."""
     res = (
         sb.table("platform_credentials")
-        .select("credentials_json")
+        .select("*")
         .eq("platform", platform)
+        .eq("is_active", True)
         .limit(1)
         .execute()
     )
     if not res.data:
         return {}
-    return res.data[0].get("credentials_json") or {}
+    return res.data[0] or {}
 
 
 class AdsSyncRequest(BaseModel):
@@ -157,8 +159,9 @@ def sync_meta_organic_endpoint(req: AdsSyncRequest):
 
     creds = _get_creds("meta")
     access_token = creds.get("access_token")
-    instagram_account_id = creds.get("instagram_account_id")
-    page_id = creds.get("page_id", "")
+    # ig_user_id is the Instagram Business Account ID (stored by publishing_routes save_credentials)
+    instagram_account_id = creds.get("ig_user_id") or creds.get("instagram_account_id")
+    page_id = creds.get("page_id") or ""
 
     if not access_token:
         raise HTTPException(status_code=400, detail="Meta access_token not configured — add it in Settings → Social publishing")
