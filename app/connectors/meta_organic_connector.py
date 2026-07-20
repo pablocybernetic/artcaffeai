@@ -147,24 +147,38 @@ def sync_meta_organic(
         except Exception as e:
             print(f"[meta_organic] could not fetch page token: {e}", flush=True)
 
-        # Step 4c: Page insights (page_engaged_users deprecated in v17+; use page_views_total)
-        try:
-            page_insights_resp = _get(f"{GRAPH_BASE}/{page_id}/insights", {
-                "access_token": page_token,
-                "metric": "page_impressions,page_post_engagements,page_views_total",
-                "period": "day",
-                "since": start_dt.isoformat(),
-                "until": end_dt.isoformat(),
-            })
-            page_metrics: dict[str, Any] = {}
-            for metric in page_insights_resp.get("data", []):
-                vals = metric.get("values") or []
-                page_metrics[metric["name"]] = sum(v.get("value", 0) for v in vals)
-            fb_page["metrics"] = page_metrics
-            print(f"[meta_organic] FB metrics: {list(page_metrics.keys())}", flush=True)
-        except Exception as e:
-            print(f"[meta_organic] FB page insights failed: {e}", flush=True)
-            fb_page["insights_error"] = str(e)
+        # Step 4c: Page insights — fetch each metric individually so one bad name
+        # doesn't kill the whole call (Meta API v21.0 is strict on metric names).
+        METRIC_CANDIDATES = [
+            ("page_impressions",        "day"),
+            ("page_impressions_unique", "day"),
+            ("page_fan_adds",           "day"),
+            ("page_post_engagements",   "day"),
+            ("page_engaged_users",      "day"),
+        ]
+        page_metrics: dict[str, Any] = {}
+        failed_metrics: list[str] = []
+        for metric_name, period in METRIC_CANDIDATES:
+            try:
+                resp = _get(f"{GRAPH_BASE}/{page_id}/insights", {
+                    "access_token": page_token,
+                    "metric": metric_name,
+                    "period": period,
+                    "since": start_dt.isoformat(),
+                    "until": end_dt.isoformat(),
+                })
+                for item in resp.get("data", []):
+                    vals = item.get("values") or []
+                    page_metrics[item["name"]] = sum(v.get("value", 0) for v in vals)
+            except Exception as e:
+                failed_metrics.append(f"{metric_name}: {str(e)[:60]}")
+        fb_page["metrics"] = page_metrics
+        if failed_metrics:
+            print(f"[meta_organic] FB metric failures: {failed_metrics}", flush=True)
+        if page_metrics:
+            print(f"[meta_organic] FB metrics fetched: {list(page_metrics.keys())}", flush=True)
+        else:
+            fb_page["insights_error"] = "No metrics available — Page token may lack read_insights permission"
 
     # ------------------------------------------------------------------
     # 5. Aggregate totals
