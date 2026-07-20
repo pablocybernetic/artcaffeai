@@ -122,16 +122,36 @@ def sync_meta_organic(
     # ------------------------------------------------------------------
     fb_page: dict[str, Any] = {}
     if page_id:
+        # Step 4a: Page info (works with user token)
         try:
             page_info = _get(f"{GRAPH_BASE}/{page_id}", {
                 "access_token": access_token,
                 "fields": "name,followers_count,fan_count",
             })
             fb_page["info"] = page_info
+        except Exception as e:
+            print(f"[meta_organic] FB page info failed: {e}", flush=True)
 
-            page_insights_resp = _get(f"{GRAPH_BASE}/{page_id}/insights", {
+        # Step 4b: Try to get a Page Access Token (needed for insights)
+        page_token = access_token  # fallback to user token
+        try:
+            accounts_resp = _get(f"{GRAPH_BASE}/me/accounts", {
                 "access_token": access_token,
-                "metric": "page_impressions,page_engaged_users,page_post_engagements",
+                "fields": "id,access_token",
+            })
+            for acct in accounts_resp.get("data", []):
+                if str(acct.get("id")) == str(page_id):
+                    page_token = acct["access_token"]
+                    print(f"[meta_organic] using page access token for page {page_id}", flush=True)
+                    break
+        except Exception as e:
+            print(f"[meta_organic] could not fetch page token: {e}", flush=True)
+
+        # Step 4c: Page insights (page_engaged_users deprecated in v17+; use page_views_total)
+        try:
+            page_insights_resp = _get(f"{GRAPH_BASE}/{page_id}/insights", {
+                "access_token": page_token,
+                "metric": "page_impressions,page_post_engagements,page_views_total",
                 "period": "day",
                 "since": start_dt.isoformat(),
                 "until": end_dt.isoformat(),
@@ -141,8 +161,10 @@ def sync_meta_organic(
                 vals = metric.get("values") or []
                 page_metrics[metric["name"]] = sum(v.get("value", 0) for v in vals)
             fb_page["metrics"] = page_metrics
-        except Exception:  # noqa: BLE001
-            pass
+            print(f"[meta_organic] FB metrics: {list(page_metrics.keys())}", flush=True)
+        except Exception as e:
+            print(f"[meta_organic] FB page insights failed: {e}", flush=True)
+            fb_page["insights_error"] = str(e)
 
     # ------------------------------------------------------------------
     # 5. Aggregate totals
