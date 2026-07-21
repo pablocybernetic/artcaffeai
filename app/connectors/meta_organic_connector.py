@@ -100,22 +100,57 @@ def sync_meta_organic(
         pass
 
     # ------------------------------------------------------------------
-    # 3. Recent media (posts + reels)
+    # 3. Recent media (posts + reels) — fetch up to 50 for DB archiving
     # ------------------------------------------------------------------
     media_resp = _get(f"{GRAPH_BASE}/{instagram_account_id}/media", {
         "access_token": access_token,
         "fields": "id,caption,media_type,timestamp,like_count,comments_count,media_url,thumbnail_url,permalink",
-        "limit": "20",
+        "limit": "50",
     })
     raw_posts = media_resp.get("data", [])
 
-    # Filter to date range
-    posts: list[dict[str, Any]] = []
+    # Enrich all posts with per-post insights (stored in DB regardless of date range)
+    all_posts: list[dict[str, Any]] = []
     for p in raw_posts:
-        ts = p.get("timestamp", "")
-        if ts and ts[:10] >= start_dt.isoformat():
-            insights = _post_insights(p["id"], access_token, p.get("media_type", "IMAGE"))
-            posts.append({**p, "insights": insights})
+        insights = _post_insights(p["id"], access_token, p.get("media_type", "IMAGE"))
+        all_posts.append({**p, "insights": insights})
+
+    # Filter to date range for dashboard stats
+    posts: list[dict[str, Any]] = [
+        p for p in all_posts
+        if p.get("timestamp", "")[:10] >= start_dt.isoformat()
+    ]
+
+    # ------------------------------------------------------------------
+    # 3b. Upsert individual posts into social_posts for AI system knowledge
+    # ------------------------------------------------------------------
+    if all_posts:
+        post_rows = [
+            {
+                "concept_id": concept_id,
+                "platform": "instagram",
+                "post_id": p["id"],
+                "media_type": p.get("media_type"),
+                "caption": p.get("caption"),
+                "permalink": p.get("permalink"),
+                "media_url": p.get("media_url"),
+                "thumbnail_url": p.get("thumbnail_url"),
+                "posted_at": p.get("timestamp"),
+                "like_count": int(p.get("like_count") or 0),
+                "comments_count": int(p.get("comments_count") or 0),
+                "insights": p.get("insights", {}),
+                "synced_at": end_dt.isoformat(),
+            }
+            for p in all_posts
+        ]
+        try:
+            sb.table("social_posts").upsert(
+                post_rows,
+                on_conflict="concept_id,platform,post_id",
+            ).execute()
+            print(f"[meta_organic] upserted {len(post_rows)} posts into social_posts", flush=True)
+        except Exception as e:
+            print(f"[meta_organic] social_posts upsert failed: {e}", flush=True)
 
     # ------------------------------------------------------------------
     # 4. Facebook Page metrics (optional)
