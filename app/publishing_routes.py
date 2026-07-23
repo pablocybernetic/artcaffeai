@@ -88,13 +88,28 @@ def _mask(token: Optional[str]) -> Optional[str]:
     return "●" * (len(token) - 6) + token[-6:]
 
 
-def _get_creds(platform: str, sb_client: Optional[Client] = None) -> Optional[dict]:
+def _get_creds(platform: str, concept_id: Optional[str] = None, sb_client: Optional[Client] = None) -> Optional[dict]:
     try:
         client = sb_client or sb
-        res = client.table("platform_credentials").select("*").eq("platform", platform).eq("is_active", True).maybe_single().execute()
+        q = client.table("platform_credentials").select("*").eq("platform", platform).eq("is_active", True)
+        q = q.eq("concept_id", concept_id) if concept_id else q.is_("concept_id", "null")
+        res = q.maybe_single().execute()
         return res.data if res is not None else None
     except Exception:
         return None
+
+
+def _upsert_platform_credentials(sb_client: Client, row: dict[str, Any], concept_id: Optional[str]) -> None:
+    """Select-then-update-or-insert by (platform, concept_id). Avoids relying on
+    PostgREST's on_conflict against a nullable composite unique key."""
+    q = sb_client.table("platform_credentials").select("id").eq("platform", row["platform"])
+    q = q.eq("concept_id", concept_id) if concept_id else q.is_("concept_id", "null")
+    existing = q.maybe_single().execute()
+
+    if existing is not None and existing.data:
+        sb_client.table("platform_credentials").update(row).eq("id", existing.data["id"]).execute()
+    else:
+        sb_client.table("platform_credentials").insert({**row, "concept_id": concept_id, "created_at": _now()}).execute()
 
 
 def _save_publish_result(
@@ -320,9 +335,9 @@ def _execute_publish(
             content_type = _platform_types.get(platform, "post")
 
             if platform == "instagram":
-                creds = _get_creds("meta", sb_client)
+                creds = _get_creds("meta", concept_id=concept_id, sb_client=sb_client)
                 if not creds:
-                    raise RuntimeError("Meta credentials not configured — add them in Settings → Social publishing")
+                    raise RuntimeError("Meta credentials not configured for this brand — add them in Settings → Social publishing")
                 if not creds.get("ig_user_id"):
                     raise RuntimeError("Instagram User ID missing — add it in Settings → Meta credentials")
                 if not creds.get("access_token"):
@@ -352,9 +367,9 @@ def _execute_publish(
                 results[platform] = {"ok": True, **r}
 
             elif platform == "facebook":
-                creds = _get_creds("meta", sb_client)
+                creds = _get_creds("meta", concept_id=concept_id, sb_client=sb_client)
                 if not creds:
-                    raise RuntimeError("Meta credentials not configured — add them in Settings → Social publishing")
+                    raise RuntimeError("Meta credentials not configured for this brand — add them in Settings → Social publishing")
                 if not creds.get("page_id"):
                     raise RuntimeError("Facebook Page ID missing — edit Meta credentials in Settings and fill in the Facebook Page ID field")
                 if not creds.get("access_token"):
@@ -528,6 +543,7 @@ class SchedulePublishRequest(PublishRequest):
 
 class CredentialsSaveRequest(BaseModel):
     platform: str                 # "meta" | "linkedin" | "google_ads" | "twitter" | "whatsapp"
+    concept_id: Optional[str] = None       # required for "meta" — brand (market/restaurant/gastro_bar) this account belongs to
     access_token: Optional[str] = None
     page_id: Optional[str] = None          # Facebook Page ID  /  WhatsApp: to_number
     ig_user_id: Optional[str] = None       # Instagram User ID / WhatsApp: phone_number_id
@@ -650,12 +666,22 @@ def schedule_post(req: SchedulePublishRequest):
 
 
 @router.get("/credentials")
-def get_credentials():
-    """Return masked credential status for all platforms (no token values)."""
+def get_credentials(concept_id: Optional[str] = None):
+    """Return masked credential status for all platforms (no token values).
+
+    For "meta", status reflects the row scoped to concept_id (when given) —
+    other platforms remain global regardless of concept_id.
+    """
     rows = sb.table("platform_credentials").select("*").eq("is_active", True).execute()
     status: dict[str, Any] = {}
     for row in (rows.data or []):
         platform = row["platform"]
+        row_concept_id = row.get("concept_id")
+        if platform == "meta":
+            if concept_id and row_concept_id != concept_id:
+                continue
+            if not concept_id and row_concept_id is not None:
+                continue
         status[platform] = {
             "connected": bool(row.get("access_token")),
             "account_name": row.get("account_name"),
@@ -680,6 +706,8 @@ def save_credentials(req: CredentialsSaveRequest):
     VALID = {"meta", "linkedin", "google_ads", "twitter", "whatsapp"}
     if req.platform not in VALID:
         raise HTTPException(400, f"platform must be one of {VALID}")
+    if req.platform == "meta" and not req.concept_id:
+        raise HTTPException(400, "concept_id is required for meta credentials — select a brand first")
 
     row: dict[str, Any] = {
         "platform": req.platform,
@@ -729,17 +757,15 @@ def save_credentials(req: CredentialsSaveRequest):
         if req.page_id:
             row["page_id"] = req.page_id
 
-    # Upsert by platform unique key — avoids the insert-vs-update race and None-execute() issues
-    row["created_at"] = _now()
-    sb.table("platform_credentials").upsert(row, on_conflict="platform").execute()
+    _upsert_platform_credentials(sb, row, req.concept_id)
 
-    return {"ok": True, "platform": req.platform}
+    return {"ok": True, "platform": req.platform, "concept_id": req.concept_id}
 
 
 @router.post("/test/{platform}")
-def test_platform(platform: str):
+def test_platform(platform: str, concept_id: Optional[str] = None):
     """Test current credentials for a platform without posting."""
-    creds = _get_creds(platform)
+    creds = _get_creds(platform, concept_id=concept_id if platform == "meta" else None)
     if not creds:
         raise HTTPException(404, f"No credentials saved for platform: {platform}")
 
@@ -774,7 +800,9 @@ def test_platform(platform: str):
 
     # Update account_name if test returned one
     if result.get("account_name"):
-        sb.table("platform_credentials").update({"account_name": result["account_name"]}).eq("platform", platform).execute()
+        q = sb.table("platform_credentials").update({"account_name": result["account_name"]}).eq("platform", platform)
+        q = q.eq("concept_id", concept_id) if (platform == "meta" and concept_id) else q.is_("concept_id", "null")
+        q.execute()
 
     return result
 

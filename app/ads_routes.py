@@ -39,16 +39,11 @@ router = APIRouter(
 )
 
 
-def _get_creds(platform: str) -> dict:
+def _get_creds(platform: str, concept_id: Optional[str] = None) -> dict:
     """Return the credential row as a flat dict (top-level columns, not credentials_json)."""
-    res = (
-        sb.table("platform_credentials")
-        .select("*")
-        .eq("platform", platform)
-        .eq("is_active", True)
-        .limit(1)
-        .execute()
-    )
+    q = sb.table("platform_credentials").select("*").eq("platform", platform).eq("is_active", True)
+    q = q.eq("concept_id", concept_id) if concept_id else q.is_("concept_id", "null")
+    res = q.limit(1).execute()
     if not res.data:
         return {}
     return res.data[0] or {}
@@ -67,7 +62,7 @@ def sync_meta_ads_endpoint(req: AdsSyncRequest):
     """Pull Meta Ads Insights API data and store as a platform_data_snapshot."""
     from connectors.meta_ads_connector import sync_meta_ads  # noqa: PLC0415
 
-    creds = _get_creds("meta")
+    creds = _get_creds("meta", concept_id=req.concept_id)
     access_token = creds.get("access_token")
     ad_account_id = creds.get("ad_account_id")
 
@@ -157,7 +152,7 @@ def sync_meta_organic_endpoint(req: AdsSyncRequest):
     """Pull Instagram Business organic metrics and store as a platform_data_snapshot."""
     from connectors.meta_organic_connector import sync_meta_organic  # noqa: PLC0415
 
-    creds = _get_creds("meta")
+    creds = _get_creds("meta", concept_id=req.concept_id)
     access_token = creds.get("access_token")
     # ig_user_id is the Instagram Business Account ID (stored by publishing_routes save_credentials)
     instagram_account_id = creds.get("ig_user_id") or creds.get("instagram_account_id")
