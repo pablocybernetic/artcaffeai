@@ -27,9 +27,13 @@ from supabase import Client, create_client
 import os
 
 from job_runner import run_job
-from image_agent import run_image_generation, run_banner_variants, select_best_asset, apply_overlay_to_asset
+from image_agent import (
+    run_image_generation, run_banner_variants, select_best_asset, apply_overlay_to_asset,
+    customize_headline_text,
+)
 from image_analysis_agent import analyze_asset as _analyze_asset
 from video_agent import run_video_generation
+from audio_mux import mux_audio_into_video
 
 # ---------------------------------------------------------------------------
 # Config
@@ -109,6 +113,16 @@ class VideoRequest(BaseModel):
     image_url: str = ""                # source image URL; auto-resolved from content_item if blank
     runway_api_key: str = ""           # from frontend Settings — overrides RUNWAYML_API_SECRET env var
     runway_model: str = ""             # override RUNWAY_MODEL env (e.g. "gen3a_turbo")
+
+
+class CustomizeHeadlineRequest(BaseModel):
+    content_item_id: str
+    headline: str
+
+
+class CustomizeAudioRequest(BaseModel):
+    content_item_id: str
+    audio_asset_id: str
 
 
 class PublishNowRequest(BaseModel):
@@ -749,3 +763,110 @@ def generate_video(req: VideoRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Video generation failed: {e}")
+
+
+@router.post("/customize-headline")
+def customize_headline(req: CustomizeHeadlineRequest):
+    """
+    Edit a content item's headline and re-bake it onto every attached image
+    that has a clean pre-overlay source. Images without one (full-AI-rendered
+    posters) are returned in skipped_assets — those need a full regenerate.
+    """
+    from anthropic import Anthropic  # noqa: PLC0415
+
+    anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    try:
+        result = customize_headline_text(
+            sb=sb,
+            anthropic=anthropic_client,
+            content_item_id=req.content_item_id,
+            headline=req.headline,
+        )
+        return result
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Customize headline failed: {e}")
+
+
+@router.post("/customize-audio")
+def customize_audio(req: CustomizeAudioRequest):
+    """
+    Mux a chosen audio asset onto the content item's attached video, replacing
+    its existing audio track. Meta's API can't attach IG/FB's licensed music
+    catalog directly, so this bakes the track into the video file before publish.
+    """
+    item_res = (
+        sb.table("content_items")
+        .select("id,concept_id,asset_ids")
+        .eq("id", req.content_item_id)
+        .single()
+        .execute()
+    )
+    if not item_res.data:
+        raise HTTPException(status_code=404, detail=f"Content item not found: {req.content_item_id}")
+    item = item_res.data
+    concept_id = item["concept_id"]
+    asset_ids = item.get("asset_ids") or []
+
+    video_res = (
+        sb.table("assets")
+        .select("id,public_url,platform")
+        .in_("id", asset_ids)
+        .eq("asset_type", "video")
+        .limit(1)
+        .execute()
+    )
+    if not video_res.data:
+        raise HTTPException(status_code=400, detail="No video asset attached to this content item")
+    video_asset = video_res.data[0]
+
+    audio_res = (
+        sb.table("assets")
+        .select("id,public_url")
+        .eq("id", req.audio_asset_id)
+        .eq("asset_type", "audio")
+        .single()
+        .execute()
+    )
+    if not audio_res.data or not audio_res.data.get("public_url"):
+        raise HTTPException(status_code=404, detail=f"Audio asset not found: {req.audio_asset_id}")
+    audio_asset = audio_res.data
+
+    try:
+        import httpx as _httpx  # noqa: PLC0415
+        video_bytes = _httpx.get(video_asset["public_url"], timeout=60.0).content
+        audio_bytes = _httpx.get(audio_asset["public_url"], timeout=60.0).content
+
+        muxed_bytes = mux_audio_into_video(video_bytes, audio_bytes)
+
+        from video_agent import _upload_video  # noqa: PLC0415
+        bucket, storage_path, public_url = _upload_video(sb, muxed_bytes, concept_id)
+        filename = storage_path.split("/")[-1]
+
+        new_asset = {
+            "concept_id": concept_id,
+            "filename": filename,
+            "storage_path": storage_path,
+            "mime_type": "video/mp4",
+            "asset_type": "video",
+            "generator": "artcaffe-ai",
+            "platform": video_asset.get("platform", "instagram"),
+            "public_url": public_url,
+            "metadata": {"audio_asset_id": req.audio_asset_id},
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        insert_res = sb.table("assets").insert(new_asset).execute()
+        saved = insert_res.data[0] if insert_res.data else new_asset
+
+        next_asset_ids = [saved["id"] if a == video_asset["id"] else a for a in asset_ids]
+        sb.table("content_items").update({
+            "asset_ids": next_asset_ids,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", req.content_item_id).execute()
+
+        return {"ok": True, "asset": saved}
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Audio mux failed: {e}")

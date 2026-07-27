@@ -26,7 +26,7 @@ import json
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from supabase import Client
@@ -667,6 +667,7 @@ def run_image_generation(
     source_url   = _get_ideation_asset_url(sb, content_item_id) if content_item_id else None
     resolved_key = (image_api_key or "").strip()
     brand_color  = _extract_brand_color(brand_context)
+    overlay_source_bytes: Optional[bytes] = None  # set below only when overlay_creative() actually runs
 
     if resolved_key:
         if image_provider == "openai":
@@ -724,6 +725,7 @@ def run_image_generation(
                 "Upload a product photo to the content item or enable AI image generation in Settings."
             )
         source_bytes = _download_image_url(source_url)
+        overlay_source_bytes = source_bytes
         image_bytes  = overlay_creative(
             source_bytes, headline, sb,
             body_text=caption,
@@ -739,6 +741,13 @@ def run_image_generation(
 
     print(f"[image_agent] uploaded to {bucket}/{storage_path}", flush=True)
 
+    # 4b. Persist the clean pre-overlay source too, so the headline text can be
+    # re-composited later without re-baking on top of already-burned-in text.
+    metadata: dict = {}
+    if overlay_source_bytes is not None:
+        _, _, overlay_source_url = _upload_to_storage(sb, overlay_source_bytes, concept_id)
+        metadata = {"overlay_source_url": overlay_source_url, "overlay_headline": headline}
+
     # 5. Create asset row
     filename = storage_path.split("/")[-1]
     asset_row: dict = {
@@ -750,6 +759,7 @@ def run_image_generation(
         "generator": "artcaffe-ai",
         "platform": platform,
         "public_url": public_url,
+        "metadata": metadata,
         "created_at": _now(),
     }
     insert_res = sb.table("assets").insert(asset_row).execute()
@@ -1132,6 +1142,10 @@ def apply_overlay_to_asset(
         bucket, storage_path, new_url = _upload_to_storage(sb, composited, concept_id)
         filename = storage_path.split("/")[-1]
 
+        # Persist the clean pre-overlay source too, so the headline can be
+        # re-composited later without re-baking on top of already-burned-in text.
+        _, _, overlay_source_url = _upload_to_storage(sb, r.content, concept_id)
+
         new_asset: dict = {
             "concept_id": concept_id,
             "filename": filename,
@@ -1141,6 +1155,7 @@ def apply_overlay_to_asset(
             "generator": "artcaffe-ai",
             "platform": asset.get("platform", "instagram"),
             "public_url": new_url,
+            "metadata": {"overlay_source_url": overlay_source_url, "overlay_headline": headline},
             "created_at": _now(),
         }
         insert_res = sb.table("assets").insert(new_asset).execute()
@@ -1167,3 +1182,94 @@ def apply_overlay_to_asset(
     except Exception as exc:
         print(f"[image_agent] overlay on selected asset failed, returning original: {exc}", flush=True)
         return asset
+
+
+# ---------------------------------------------------------------------------
+# Edit the headline text already baked onto a content item's image(s)
+# ---------------------------------------------------------------------------
+def customize_headline_text(
+    *,
+    sb: Client,
+    anthropic: Any = None,
+    content_item_id: str,
+    headline: str,
+) -> dict:
+    """
+    Update a content item's headline and re-composite it onto every attached
+    image asset that has a clean pre-overlay source (metadata.overlay_source_url).
+    Assets without one (e.g. full-AI-rendered posters) are reported as skipped —
+    those need a full regenerate instead, since there's no clean photo to re-composite.
+    """
+    item_res = (
+        sb.table("content_items")
+        .select("id,concept_id,asset_ids")
+        .eq("id", content_item_id)
+        .single()
+        .execute()
+    )
+    if not item_res.data:
+        raise RuntimeError(f"Content item not found: {content_item_id}")
+    item = item_res.data
+    concept_id = item["concept_id"]
+    asset_ids = item.get("asset_ids") or []
+
+    sb.table("content_items").update({"headline": headline, "updated_at": _now()}).eq("id", content_item_id).execute()
+
+    if not asset_ids:
+        return {"ok": True, "updated_assets": [], "skipped_assets": []}
+
+    assets_res = (
+        sb.table("assets")
+        .select("id,asset_type,metadata,platform")
+        .in_("id", asset_ids)
+        .eq("asset_type", "image")
+        .execute()
+    )
+    image_assets = assets_res.data or []
+
+    updated_assets: list[dict] = []
+    skipped_assets: list[str] = []
+    next_asset_ids = list(asset_ids)
+
+    for old_asset in image_assets:
+        overlay_source_url = (old_asset.get("metadata") or {}).get("overlay_source_url")
+        if not overlay_source_url:
+            skipped_assets.append(old_asset["id"])
+            continue
+
+        try:
+            r = httpx.get(overlay_source_url, timeout=30.0)
+            r.raise_for_status()
+            composited = overlay_creative(r.content, headline, sb, anthropic=anthropic)
+
+            bucket, storage_path, new_url = _upload_to_storage(sb, composited, concept_id)
+            filename = storage_path.split("/")[-1]
+
+            new_asset: dict = {
+                "concept_id": concept_id,
+                "filename": filename,
+                "storage_path": storage_path,
+                "mime_type": "image/png",
+                "asset_type": "image",
+                "generator": "artcaffe-ai",
+                "platform": old_asset.get("platform", "instagram"),
+                "public_url": new_url,
+                "metadata": {"overlay_source_url": overlay_source_url, "overlay_headline": headline},
+                "created_at": _now(),
+            }
+            insert_res = sb.table("assets").insert(new_asset).execute()
+            saved = insert_res.data[0] if insert_res.data else new_asset
+
+            next_asset_ids = [saved["id"] if a == old_asset["id"] else a for a in next_asset_ids]
+            updated_assets.append(saved)
+        except Exception as exc:
+            print(f"[image_agent] customize_headline_text failed for asset {old_asset['id']}: {exc}", flush=True)
+            skipped_assets.append(old_asset["id"])
+
+    if updated_assets:
+        sb.table("content_items").update({
+            "asset_ids": next_asset_ids,
+            "updated_at": _now(),
+        }).eq("id", content_item_id).execute()
+
+    return {"ok": True, "updated_assets": updated_assets, "skipped_assets": skipped_assets}
