@@ -1300,15 +1300,17 @@ def customize_asset_layout(
     body_y_pct, body_size_pct, body_color, body_align, scrim_position,
     scrim_height_pct, scrim_opacity.
 
-    Requires the asset to have a clean pre-overlay source
-    (metadata.overlay_source_url) — assets without one (e.g. full-AI-rendered
-    posters) need a full regenerate instead, since there's no clean photo to
-    re-composite onto. Overwrites the asset's existing storage object in
-    place, so its public_url never changes.
+    Every image asset is editable: if it has no clean pre-overlay source yet
+    (metadata.overlay_source_url — e.g. a catalog photo or a full-AI-rendered
+    poster that never went through the PIL overlay pipeline), its CURRENT
+    image is snapshotted once as that clean source before the first edit, so
+    later edits recomposite onto the untouched original instead of stacking
+    text on top of previously-baked text. Overwrites the asset's existing
+    storage object in place, so its public_url never changes.
     """
     asset_res = (
         sb.table("assets")
-        .select("id,metadata,public_url,asset_type")
+        .select("id,metadata,public_url,asset_type,concept_id")
         .eq("id", asset_id)
         .single()
         .execute()
@@ -1319,12 +1321,11 @@ def customize_asset_layout(
     if asset.get("asset_type") != "image":
         raise RuntimeError("Only image assets can be edited with the layout editor")
 
-    overlay_source_url = (asset.get("metadata") or {}).get("overlay_source_url")
+    metadata = asset.get("metadata") or {}
+    overlay_source_url = metadata.get("overlay_source_url")
     if not overlay_source_url:
-        raise RuntimeError(
-            "This image has no editable source — it was likely generated as a "
-            "complete poster. Regenerate the banner instead."
-        )
+        current_bytes = httpx.get(asset["public_url"], timeout=30.0).content
+        _, _, overlay_source_url = _upload_to_storage(sb, current_bytes, asset["concept_id"])
 
     r = httpx.get(overlay_source_url, timeout=30.0)
     r.raise_for_status()
@@ -1353,7 +1354,92 @@ def customize_asset_layout(
     bucket, storage_path = _bucket_and_path_from_url(asset["public_url"])
     _upload_in_place(sb, bucket, storage_path, composited, "image/png")
 
-    new_metadata = {**layout, "overlay_source_url": overlay_source_url}
+    new_metadata = {**metadata, **layout, "overlay_source_url": overlay_source_url}
+    sb.table("assets").update({
+        "metadata": new_metadata,
+        "updated_at": _now(),
+    }).eq("id", asset_id).execute()
+
+    return {"ok": True, "asset": {**asset, "metadata": new_metadata}}
+
+
+# ---------------------------------------------------------------------------
+# Product photo standardization — 1000x1000, centered, white background
+# ---------------------------------------------------------------------------
+_PRODUCT_SHOT_PROMPT = (
+    "Professional e-commerce product photography. Isolate the product from this "
+    "image and place it centered on a pure white (#FFFFFF) background. No "
+    "shadows, no props, no other objects, no text or watermarks. Square 1:1 "
+    "composition, product filling most of the frame with a small even margin."
+)
+
+
+def _pad_to_square_white(image_bytes: bytes, size: int = 1000) -> bytes:
+    """Fit an image within size x size preserving aspect ratio, centered on a
+    pure white square canvas. Guarantees exact output dimensions regardless
+    of the source's aspect ratio or the AI provider's actual output size."""
+    import io as _io
+    from PIL import Image
+    img = Image.open(_io.BytesIO(image_bytes)).convert("RGB")
+    img.thumbnail((size, size), Image.LANCZOS)
+    canvas = Image.new("RGB", (size, size), (255, 255, 255))
+    x = (size - img.width) // 2
+    y = (size - img.height) // 2
+    canvas.paste(img, (x, y))
+    buf = _io.BytesIO()
+    canvas.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+def standardize_product_image(
+    *,
+    sb: Client,
+    asset_id: str,
+    mode: str = "simple",
+    openai_api_key: str = "",
+) -> dict:
+    """
+    Reformat a single image asset into a standard 1000x1000 product shot —
+    centered on a pure white background.
+
+    mode="simple": pure resize + white-pad, no background removal — works
+      well for photos already on a plain/white background.
+    mode="openai": runs the photo through OpenAI gpt-image-1's image edit
+      first to actually remove/replace the background, then pads the result
+      to exact 1000x1000 — handles busy/dark backgrounds properly.
+
+    Overwrites the asset's existing storage object in place (same public_url).
+    Clears metadata.overlay_source_url so the layout editor re-snapshots this
+    new standardized photo as its clean source on the next text edit.
+    """
+    asset_res = (
+        sb.table("assets")
+        .select("id,metadata,public_url,asset_type")
+        .eq("id", asset_id)
+        .single()
+        .execute()
+    )
+    if not asset_res.data:
+        raise RuntimeError(f"Asset not found: {asset_id}")
+    asset = asset_res.data
+    if asset.get("asset_type") != "image":
+        raise RuntimeError("Only image assets can be standardized")
+
+    source_bytes = httpx.get(asset["public_url"], timeout=30.0).content
+
+    if mode == "openai":
+        oai_key = _resolve_openai_key(openai_api_key)
+        edited_bytes = _edit_openai(source_bytes, _PRODUCT_SHOT_PROMPT, "1024x1024", oai_key)
+        final_bytes = _pad_to_square_white(edited_bytes, 1000)
+    else:
+        final_bytes = _pad_to_square_white(source_bytes, 1000)
+
+    bucket, storage_path = _bucket_and_path_from_url(asset["public_url"])
+    _upload_in_place(sb, bucket, storage_path, final_bytes, "image/png")
+
+    metadata = asset.get("metadata") or {}
+    new_metadata = {**metadata, "standardized_mode": mode}
+    new_metadata.pop("overlay_source_url", None)
     sb.table("assets").update({
         "metadata": new_metadata,
         "updated_at": _now(),

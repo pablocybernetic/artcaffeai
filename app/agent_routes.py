@@ -29,7 +29,8 @@ import os
 from job_runner import run_job
 from image_agent import (
     run_image_generation, run_banner_variants, select_best_asset, apply_overlay_to_asset,
-    customize_headline_text, customize_asset_layout, _bucket_and_path_from_url, _upload_in_place,
+    customize_headline_text, customize_asset_layout, standardize_product_image,
+    _bucket_and_path_from_url, _upload_in_place,
 )
 from image_analysis_agent import analyze_asset as _analyze_asset
 from video_agent import run_video_generation
@@ -141,6 +142,12 @@ class CustomizeAssetLayoutRequest(BaseModel):
     scrim_position: str = "bottom"     # "top" | "bottom" | "none"
     scrim_height_pct: float = 0.35
     scrim_opacity: float = 0.65
+
+
+class StandardizeProductRequest(BaseModel):
+    asset_id: str
+    mode: str = "simple"           # "simple" | "openai"
+    openai_api_key: str = ""       # from frontend Settings — overrides OPENAI_API_KEY env var
 
 
 class PublishNowRequest(BaseModel):
@@ -904,3 +911,24 @@ def customize_asset_layout_endpoint(req: CustomizeAssetLayoutRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Layout customization failed: {e}")
+
+
+@router.post("/standardize-product-image")
+def standardize_product_image_endpoint(req: StandardizeProductRequest):
+    """
+    Reformat an image asset into a standard 1000x1000 product shot centered
+    on a pure white background. mode="openai" runs it through OpenAI first
+    to actually remove/replace the background; mode="simple" just resizes
+    and pads (works well when the photo is already on a plain background).
+    """
+    try:
+        return standardize_product_image(
+            sb=sb,
+            asset_id=req.asset_id,
+            mode=req.mode,
+            openai_api_key=req.openai_api_key,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Product standardization failed: {e}")
