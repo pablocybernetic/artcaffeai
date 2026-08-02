@@ -1374,14 +1374,19 @@ _PRODUCT_SHOT_PROMPT = (
 )
 
 
-def _pad_to_square_white(image_bytes: bytes, size: int = 1000) -> bytes:
-    """Fit an image within size x size preserving aspect ratio, centered on a
-    pure white square canvas. Guarantees exact output dimensions regardless
+def _pad_to_square_white(image_bytes: bytes, size: int = 1000, padding_pct: float = 0.05) -> bytes:
+    """Fit an image so its LONGEST side occupies exactly (1 - 2*padding_pct)
+    of the canvas, then center it on a pure white size x size square. This
+    guarantees a consistent 5% margin on whichever pair of sides is longest —
+    top/bottom for a portrait-oriented object, left/right for landscape —
+    with the shorter axis centered (and proportionally more padded, since
+    aspect ratio is preserved). Output dimensions are always exact regardless
     of the source's aspect ratio or the AI provider's actual output size."""
     import io as _io
     from PIL import Image
     img = Image.open(_io.BytesIO(image_bytes)).convert("RGB")
-    img.thumbnail((size, size), Image.LANCZOS)
+    target = max(1, int(size * (1 - 2 * padding_pct)))
+    img.thumbnail((target, target), Image.LANCZOS)
     canvas = Image.new("RGB", (size, size), (255, 255, 255))
     x = (size - img.width) // 2
     y = (size - img.height) // 2
