@@ -29,7 +29,7 @@ import os
 from job_runner import run_job
 from image_agent import (
     run_image_generation, run_banner_variants, select_best_asset, apply_overlay_to_asset,
-    customize_headline_text,
+    customize_headline_text, customize_asset_layout, _bucket_and_path_from_url, _upload_in_place,
 )
 from image_analysis_agent import analyze_asset as _analyze_asset
 from video_agent import run_video_generation
@@ -123,6 +123,24 @@ class CustomizeHeadlineRequest(BaseModel):
 class CustomizeAudioRequest(BaseModel):
     content_item_id: str
     audio_asset_id: str
+
+
+class TextLayerParams(BaseModel):
+    text: str = ""
+    x_pct: float = 0.07
+    y_pct: float = 0.70
+    size_pct: float = 0.072
+    color: str = "#FFFFFF"
+    align: str = "left"   # "left" | "center"
+
+
+class CustomizeAssetLayoutRequest(BaseModel):
+    asset_id: str
+    headline: TextLayerParams = TextLayerParams()
+    body: TextLayerParams = TextLayerParams(y_pct=0.85, size_pct=0.028)
+    scrim_position: str = "bottom"     # "top" | "bottom" | "none"
+    scrim_height_pct: float = 0.35
+    scrim_opacity: float = 0.65
 
 
 class PublishNowRequest(BaseModel):
@@ -798,7 +816,7 @@ def customize_audio(req: CustomizeAudioRequest):
     """
     item_res = (
         sb.table("content_items")
-        .select("id,concept_id,asset_ids")
+        .select("id,asset_ids")
         .eq("id", req.content_item_id)
         .single()
         .execute()
@@ -806,7 +824,6 @@ def customize_audio(req: CustomizeAudioRequest):
     if not item_res.data:
         raise HTTPException(status_code=404, detail=f"Content item not found: {req.content_item_id}")
     item = item_res.data
-    concept_id = item["concept_id"]
     asset_ids = item.get("asset_ids") or []
 
     video_res = (
@@ -840,33 +857,50 @@ def customize_audio(req: CustomizeAudioRequest):
 
         muxed_bytes = mux_audio_into_video(video_bytes, audio_bytes)
 
-        from video_agent import _upload_video  # noqa: PLC0415
-        bucket, storage_path, public_url = _upload_video(sb, muxed_bytes, concept_id)
-        filename = storage_path.split("/")[-1]
+        # Overwrite the video's existing storage object in place — same
+        # bucket/path means its public_url never changes.
+        bucket, storage_path = _bucket_and_path_from_url(video_asset["public_url"])
+        _upload_in_place(sb, bucket, storage_path, muxed_bytes, "video/mp4")
 
-        new_asset = {
-            "concept_id": concept_id,
-            "filename": filename,
-            "storage_path": storage_path,
-            "mime_type": "video/mp4",
-            "asset_type": "video",
-            "generator": "artcaffe-ai",
-            "platform": video_asset.get("platform", "instagram"),
-            "public_url": public_url,
-            "metadata": {"audio_asset_id": req.audio_asset_id},
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        insert_res = sb.table("assets").insert(new_asset).execute()
-        saved = insert_res.data[0] if insert_res.data else new_asset
-
-        next_asset_ids = [saved["id"] if a == video_asset["id"] else a for a in asset_ids]
-        sb.table("content_items").update({
-            "asset_ids": next_asset_ids,
+        new_metadata = {"audio_asset_id": req.audio_asset_id}
+        sb.table("assets").update({
+            "metadata": new_metadata,
             "updated_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", req.content_item_id).execute()
+        }).eq("id", video_asset["id"]).execute()
 
-        return {"ok": True, "asset": saved}
+        return {"ok": True, "asset": {**video_asset, "metadata": new_metadata}}
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Audio mux failed: {e}")
+
+
+@router.post("/customize-asset-layout")
+def customize_asset_layout_endpoint(req: CustomizeAssetLayoutRequest):
+    """
+    Re-composite a single image asset's headline/body text at explicit
+    positions from the Assets page's drag-to-position layout editor.
+    """
+    layout = {
+        "headline_text": req.headline.text,
+        "headline_x_pct": req.headline.x_pct,
+        "headline_y_pct": req.headline.y_pct,
+        "headline_size_pct": req.headline.size_pct,
+        "headline_color": req.headline.color,
+        "headline_align": req.headline.align,
+        "body_text": req.body.text,
+        "body_x_pct": req.body.x_pct,
+        "body_y_pct": req.body.y_pct,
+        "body_size_pct": req.body.size_pct,
+        "body_color": req.body.color,
+        "body_align": req.body.align,
+        "scrim_position": req.scrim_position,
+        "scrim_height_pct": req.scrim_height_pct,
+        "scrim_opacity": req.scrim_opacity,
+    }
+    try:
+        return customize_asset_layout(sb=sb, asset_id=req.asset_id, layout=layout)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Layout customization failed: {e}")

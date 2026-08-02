@@ -32,7 +32,7 @@ import httpx
 from supabase import Client
 
 from brand_context import get_active
-from image_overlay import overlay_creative
+from image_overlay import overlay_creative, overlay_freeform
 from brand_assets_context import format_for_image_prompt, load_brand_assets_context
 
 # ---------------------------------------------------------------------------
@@ -591,6 +591,29 @@ def _upload_to_storage(sb: Client, image_bytes: bytes, concept_id: str) -> tuple
             print(f"[image_agent] upload to bucket '{bucket}' failed: {e}", flush=True)
 
     raise RuntimeError("Could not upload image to any Supabase Storage bucket")
+
+
+def _bucket_and_path_from_url(public_url: str) -> tuple[str, str]:
+    """Recover (bucket, storage_path) from a Supabase Storage public URL."""
+    marker = "/object/public/"
+    idx = public_url.find(marker)
+    if idx < 0:
+        raise RuntimeError(f"Not a Supabase Storage public URL: {public_url}")
+    rest = public_url[idx + len(marker):]
+    bucket, _, path = rest.partition("/")
+    if not path:
+        raise RuntimeError(f"Could not parse storage path from URL: {public_url}")
+    return bucket, path
+
+
+def _upload_in_place(sb: Client, bucket: str, storage_path: str, content_bytes: bytes, content_type: str) -> str:
+    """Overwrite an existing storage object at the same path — its public URL never changes."""
+    sb.storage.from_(bucket).upload(
+        storage_path,
+        content_bytes,
+        file_options={"content-type": content_type, "upsert": "true"},
+    )
+    return sb.storage.from_(bucket).get_public_url(storage_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1202,7 +1225,7 @@ def customize_headline_text(
     """
     item_res = (
         sb.table("content_items")
-        .select("id,concept_id,asset_ids")
+        .select("id,asset_ids")
         .eq("id", content_item_id)
         .single()
         .execute()
@@ -1210,7 +1233,6 @@ def customize_headline_text(
     if not item_res.data:
         raise RuntimeError(f"Content item not found: {content_item_id}")
     item = item_res.data
-    concept_id = item["concept_id"]
     asset_ids = item.get("asset_ids") or []
 
     sb.table("content_items").update({"headline": headline, "updated_at": _now()}).eq("id", content_item_id).execute()
@@ -1220,7 +1242,7 @@ def customize_headline_text(
 
     assets_res = (
         sb.table("assets")
-        .select("id,asset_type,metadata,platform")
+        .select("id,asset_type,metadata,platform,public_url")
         .in_("id", asset_ids)
         .eq("asset_type", "image")
         .execute()
@@ -1229,7 +1251,6 @@ def customize_headline_text(
 
     updated_assets: list[dict] = []
     skipped_assets: list[str] = []
-    next_asset_ids = list(asset_ids)
 
     for old_asset in image_assets:
         overlay_source_url = (old_asset.get("metadata") or {}).get("overlay_source_url")
@@ -1242,34 +1263,100 @@ def customize_headline_text(
             r.raise_for_status()
             composited = overlay_creative(r.content, headline, sb, anthropic=anthropic)
 
-            bucket, storage_path, new_url = _upload_to_storage(sb, composited, concept_id)
-            filename = storage_path.split("/")[-1]
+            # Overwrite the asset's existing storage object in place — same
+            # bucket/path means its public_url never changes.
+            bucket, storage_path = _bucket_and_path_from_url(old_asset["public_url"])
+            _upload_in_place(sb, bucket, storage_path, composited, "image/png")
 
-            new_asset: dict = {
-                "concept_id": concept_id,
-                "filename": filename,
-                "storage_path": storage_path,
-                "mime_type": "image/png",
-                "asset_type": "image",
-                "generator": "artcaffe-ai",
-                "platform": old_asset.get("platform", "instagram"),
-                "public_url": new_url,
-                "metadata": {"overlay_source_url": overlay_source_url, "overlay_headline": headline},
-                "created_at": _now(),
-            }
-            insert_res = sb.table("assets").insert(new_asset).execute()
-            saved = insert_res.data[0] if insert_res.data else new_asset
+            new_metadata = {"overlay_source_url": overlay_source_url, "overlay_headline": headline}
+            sb.table("assets").update({
+                "metadata": new_metadata,
+                "updated_at": _now(),
+            }).eq("id", old_asset["id"]).execute()
 
-            next_asset_ids = [saved["id"] if a == old_asset["id"] else a for a in next_asset_ids]
-            updated_assets.append(saved)
+            updated_assets.append({**old_asset, "metadata": new_metadata})
         except Exception as exc:
             print(f"[image_agent] customize_headline_text failed for asset {old_asset['id']}: {exc}", flush=True)
             skipped_assets.append(old_asset["id"])
 
-    if updated_assets:
-        sb.table("content_items").update({
-            "asset_ids": next_asset_ids,
-            "updated_at": _now(),
-        }).eq("id", content_item_id).execute()
-
     return {"ok": True, "updated_assets": updated_assets, "skipped_assets": skipped_assets}
+
+
+# ---------------------------------------------------------------------------
+# Assets-page canvas editor — drag-to-position headline/body/scrim
+# ---------------------------------------------------------------------------
+def customize_asset_layout(
+    *,
+    sb: Client,
+    asset_id: str,
+    layout: dict,
+) -> dict:
+    """
+    Re-composite a single asset's headline/body text at explicit, user-chosen
+    positions (from the Assets page's drag-to-position layout editor).
+
+    `layout` keys: headline_text, headline_x_pct, headline_y_pct,
+    headline_size_pct, headline_color, headline_align, body_text, body_x_pct,
+    body_y_pct, body_size_pct, body_color, body_align, scrim_position,
+    scrim_height_pct, scrim_opacity.
+
+    Requires the asset to have a clean pre-overlay source
+    (metadata.overlay_source_url) — assets without one (e.g. full-AI-rendered
+    posters) need a full regenerate instead, since there's no clean photo to
+    re-composite onto. Overwrites the asset's existing storage object in
+    place, so its public_url never changes.
+    """
+    asset_res = (
+        sb.table("assets")
+        .select("id,metadata,public_url,asset_type")
+        .eq("id", asset_id)
+        .single()
+        .execute()
+    )
+    if not asset_res.data:
+        raise RuntimeError(f"Asset not found: {asset_id}")
+    asset = asset_res.data
+    if asset.get("asset_type") != "image":
+        raise RuntimeError("Only image assets can be edited with the layout editor")
+
+    overlay_source_url = (asset.get("metadata") or {}).get("overlay_source_url")
+    if not overlay_source_url:
+        raise RuntimeError(
+            "This image has no editable source — it was likely generated as a "
+            "complete poster. Regenerate the banner instead."
+        )
+
+    r = httpx.get(overlay_source_url, timeout=30.0)
+    r.raise_for_status()
+
+    composited = overlay_freeform(
+        r.content, sb,
+        headline_text=layout.get("headline_text", ""),
+        headline_x_pct=layout.get("headline_x_pct", 0.07),
+        headline_y_pct=layout.get("headline_y_pct", 0.70),
+        headline_size_pct=layout.get("headline_size_pct", 0.072),
+        headline_color=layout.get("headline_color", "#FFFFFF"),
+        headline_align=layout.get("headline_align", "left"),
+        body_text=layout.get("body_text", ""),
+        body_x_pct=layout.get("body_x_pct", 0.07),
+        body_y_pct=layout.get("body_y_pct", 0.85),
+        body_size_pct=layout.get("body_size_pct", 0.028),
+        body_color=layout.get("body_color", "#FFFFFF"),
+        body_align=layout.get("body_align", "left"),
+        scrim_position=layout.get("scrim_position", "bottom"),
+        scrim_height_pct=layout.get("scrim_height_pct", 0.35),
+        scrim_opacity=layout.get("scrim_opacity", 0.65),
+    )
+
+    # Overwrite the asset's existing storage object in place — same
+    # bucket/path means its public_url never changes.
+    bucket, storage_path = _bucket_and_path_from_url(asset["public_url"])
+    _upload_in_place(sb, bucket, storage_path, composited, "image/png")
+
+    new_metadata = {**layout, "overlay_source_url": overlay_source_url}
+    sb.table("assets").update({
+        "metadata": new_metadata,
+        "updated_at": _now(),
+    }).eq("id", asset_id).execute()
+
+    return {"ok": True, "asset": {**asset, "metadata": new_metadata}}

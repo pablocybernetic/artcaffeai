@@ -461,6 +461,51 @@ def _draw_text_block(
     return y
 
 
+def _draw_positioned_text(
+    draw,
+    text: str,
+    font,
+    x: int,
+    y: int,
+    max_w: int,
+    text_rgb: tuple[int, int, int],
+    align: str = "left",
+    shadow: bool = True,
+) -> int:
+    """
+    Render one wrapped text block at an explicit (x, y) — used by the freeform
+    layout editor where headline and body move independently, unlike
+    _draw_text_block's fixed headline-then-body-below-it flow.
+    x is the left edge for "left" align, or the horizontal midpoint for "center".
+    Returns the y coordinate below the last rendered line.
+    """
+    if not text:
+        return y
+
+    lines = _wrap(text, font, max_w, draw)[:4]
+    line_h = _line_h(font, draw)
+    gap = max(6, int(line_h * 0.18))
+
+    def _shadow_offsets():
+        return [(dx, dy) for dx in range(-2, 3) for dy in range(-2, 3)
+                if abs(dx) + abs(dy) <= 3 and (dx or dy)]
+
+    cur_y = y
+    for line in lines:
+        bb = draw.textbbox((0, 0), line, font=font)
+        lw = bb[2] - bb[0]
+        lh = bb[3] - bb[1]
+        lx = x - lw // 2 if align == "center" else x
+
+        if shadow:
+            for dx, dy in _shadow_offsets():
+                draw.text((lx + dx, cur_y + dy), line, font=font, fill=(0, 0, 0, 160))
+        draw.text((lx, cur_y), line, font=font, fill=(*text_rgb, 255))
+        cur_y += lh + gap
+
+    return cur_y
+
+
 # ── Scrim helper ─────────────────────────────────────────────────────────────
 
 def _draw_scrim(W: int, H: int, solid_top: int, fade_height: int = 80) -> "Image.Image":
@@ -816,6 +861,112 @@ def overlay_creative(
 
     except Exception as exc:
         print(f"[image_overlay] overlay failed, returning original: {exc}", flush=True)
+        return image_bytes
+
+
+# ── Freeform layout — user-positioned text, no Claude call ──────────────────
+
+def overlay_freeform(
+    image_bytes: bytes,
+    sb: Client,
+    *,
+    headline_text: str = "",
+    headline_x_pct: float = 0.07,
+    headline_y_pct: float = 0.70,
+    headline_size_pct: float = 0.072,
+    headline_color: str = "#FFFFFF",
+    headline_align: str = "left",
+    body_text: str = "",
+    body_x_pct: float = 0.07,
+    body_y_pct: float = 0.85,
+    body_size_pct: float = 0.028,
+    body_color: str = "#FFFFFF",
+    body_align: str = "left",
+    scrim_position: str = "bottom",   # "top" | "bottom" | "none"
+    scrim_height_pct: float = 0.35,
+    scrim_opacity: float = 0.65,
+) -> bytes:
+    """
+    Composite headline + body text at explicit, caller-chosen positions/styles.
+    Used by the Assets page's drag-to-position layout editor — no Claude call,
+    no template auto-selection, just deterministic placement. Returns
+    composited PNG bytes; on any error returns the original bytes unchanged.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        print("[image_overlay] Pillow not installed — skipping overlay", flush=True)
+        return image_bytes
+
+    try:
+        from PIL import ImageDraw
+
+        font_map = _load_font_map(sb)
+        font_names = list(font_map.keys())
+
+        _HEADLINE_REQUIRED = ["Gotham-Medium.otf", "Gotham-Bold.otf"]
+        default_h = font_names[0] if font_names else ""
+        default_b = font_names[1] if len(font_names) > 1 else default_h
+        h_fname = next((f for f in _HEADLINE_REQUIRED if f in font_names), default_h)
+        b_fname = next((f for f in font_names if f != h_fname), default_b)
+
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        W, H = img.size
+        canvas = img.convert("RGBA")
+
+        if scrim_position in ("top", "bottom") and scrim_opacity > 0:
+            scrim_h  = max(1, int(H * scrim_height_pct))
+            alpha    = int(255 * min(max(scrim_opacity, 0.0), 1.0))
+            fade_h   = max(1, int(scrim_h * 0.35))
+            scrim    = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            sd       = ImageDraw.Draw(scrim)
+            if scrim_position == "top":
+                sd.rectangle([(0, 0), (W, scrim_h)], fill=(0, 0, 0, alpha))
+                for i in range(fade_h):
+                    a = int(alpha * ((fade_h - i) / fade_h) ** 1.6)
+                    y = scrim_h + i
+                    if 0 <= y < H:
+                        sd.line([(0, y), (W, y)], fill=(0, 0, 0, a))
+            else:
+                solid_y = H - scrim_h
+                for i in range(fade_h):
+                    a = int(alpha * (i / fade_h) ** 1.6)
+                    y = solid_y - fade_h + i
+                    if 0 <= y < H:
+                        sd.line([(0, y), (W, y)], fill=(0, 0, 0, a))
+                sd.rectangle([(0, solid_y), (W, H)], fill=(0, 0, 0, alpha))
+            canvas = Image.alpha_composite(canvas, scrim)
+
+        overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        d = ImageDraw.Draw(overlay)
+
+        if headline_text:
+            h_size = max(16, int(W * headline_size_pct))
+            h_font = _pil_font(font_map.get(h_fname), h_size)
+            h_rgb  = _hex_to_rgb(headline_color) if headline_color.startswith("#") else _hex_to_rgb(_DEFAULT_COLOR)
+            hx     = int(W * headline_x_pct)
+            hy     = int(H * headline_y_pct)
+            max_w  = int(W * 0.86) if headline_align == "center" else W - hx - int(W * 0.05)
+            _draw_positioned_text(d, headline_text.upper(), h_font, hx, hy, max_w, h_rgb, headline_align, shadow=True)
+
+        if body_text:
+            b_size = max(12, int(W * body_size_pct))
+            b_font = _pil_font(font_map.get(b_fname), b_size)
+            b_rgb  = _hex_to_rgb(body_color) if body_color.startswith("#") else _hex_to_rgb(_DEFAULT_COLOR)
+            bx     = int(W * body_x_pct)
+            by     = int(H * body_y_pct)
+            max_w  = int(W * 0.86) if body_align == "center" else W - bx - int(W * 0.05)
+            _draw_positioned_text(d, body_text, b_font, bx, by, max_w, b_rgb, body_align, shadow=True)
+
+        result = Image.alpha_composite(canvas, overlay)
+        buf = io.BytesIO()
+        result.convert("RGB").save(buf, format="PNG", optimize=True)
+        data = buf.getvalue()
+        print(f"[image_overlay] freeform render — {len(data)//1024} KB", flush=True)
+        return data
+
+    except Exception as exc:
+        print(f"[image_overlay] freeform overlay failed, returning original: {exc}", flush=True)
         return image_bytes
 
 
