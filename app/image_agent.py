@@ -500,7 +500,7 @@ def _generate_openai(prompt: str, size: str, api_key: str) -> bytes:
     """Text-to-image via OpenAI gpt-image-1. Returns PNG bytes."""
     import base64 as _b64
     import openai as _oai
-    client = _oai.OpenAI(api_key=api_key)
+    client = _oai.OpenAI(api_key=api_key, timeout=90.0)
     oai_size = _OPENAI_SIZE_MAP.get(size, "1024x1024")
     response = client.images.generate(
         model="gpt-image-1",
@@ -516,7 +516,7 @@ def _edit_openai(source_bytes: bytes, prompt: str, size: str, api_key: str) -> b
     import base64 as _b64
     import io as _io
     import openai as _oai
-    client = _oai.OpenAI(api_key=api_key)
+    client = _oai.OpenAI(api_key=api_key, timeout=90.0)
     oai_size = _OPENAI_SIZE_MAP.get(size, "1024x1024")
     response = client.images.edit(
         model="gpt-image-1",
@@ -1324,14 +1324,17 @@ def customize_asset_layout(
     metadata = asset.get("metadata") or {}
     overlay_source_url = metadata.get("overlay_source_url")
     if not overlay_source_url:
-        current_bytes = httpx.get(asset["public_url"], timeout=30.0).content
+        current_resp = httpx.get(asset["public_url"], timeout=30.0, follow_redirects=True)
+        current_resp.raise_for_status()
+        current_bytes = _downscale_if_huge(current_resp.content)
         _, _, overlay_source_url = _upload_to_storage(sb, current_bytes, asset["concept_id"])
 
-    r = httpx.get(overlay_source_url, timeout=30.0)
+    r = httpx.get(overlay_source_url, timeout=30.0, follow_redirects=True)
     r.raise_for_status()
+    source_bytes = _downscale_if_huge(r.content)
 
     composited = overlay_freeform(
-        r.content, sb,
+        source_bytes, sb,
         headline_text=layout.get("headline_text", ""),
         headline_x_pct=layout.get("headline_x_pct", 0.07),
         headline_y_pct=layout.get("headline_y_pct", 0.70),
@@ -1372,6 +1375,26 @@ _PRODUCT_SHOT_PROMPT = (
     "shadows, no props, no other objects, no text or watermarks. Square 1:1 "
     "composition, product filling most of the frame with a small even margin."
 )
+
+
+_MAX_SOURCE_BYTES = 15 * 1024 * 1024  # 15 MB — reject pathologically large downloads outright
+_MAX_SOURCE_DIM = 2000  # downscale before any heavy processing to bound CPU/memory on a small VM
+
+
+def _downscale_if_huge(image_bytes: bytes, max_dim: int = _MAX_SOURCE_DIM) -> bytes:
+    """Cap an image's longest side before feeding it to PIL/OpenAI — a handful
+    of concurrent full-resolution decodes can spike CPU/memory enough to
+    starve other services (e.g. Postgres) sharing the same small VM."""
+    import io as _io
+    from PIL import Image
+    img = Image.open(_io.BytesIO(image_bytes))
+    if max(img.size) <= max_dim:
+        return image_bytes
+    img = img.convert("RGB")
+    img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+    buf = _io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    return buf.getvalue()
 
 
 def _pad_to_square_white(image_bytes: bytes, size: int = 1000, padding_pct: float = 0.05) -> bytes:
@@ -1430,7 +1453,15 @@ def standardize_product_image(
     if asset.get("asset_type") != "image":
         raise RuntimeError("Only image assets can be standardized")
 
-    source_bytes = httpx.get(asset["public_url"], timeout=30.0).content
+    resp = httpx.get(asset["public_url"], timeout=30.0, follow_redirects=True)
+    resp.raise_for_status()
+    source_bytes = resp.content
+    if len(source_bytes) > _MAX_SOURCE_BYTES:
+        raise RuntimeError(
+            f"Source image is too large to standardize ({len(source_bytes) // (1024*1024)} MB, "
+            f"max {_MAX_SOURCE_BYTES // (1024*1024)} MB)"
+        )
+    source_bytes = _downscale_if_huge(source_bytes)
 
     if mode == "openai":
         oai_key = _resolve_openai_key(openai_api_key)
