@@ -24,6 +24,8 @@ from typing import Any, Optional
 
 from supabase import Client
 
+from ai_error_log import record_ai_error, clear_ai_error
+
 MODEL = "claude-sonnet-4-6"
 STUCK_THRESHOLD_MINUTES = 15   # jobs running longer than this are considered stuck
 
@@ -246,7 +248,7 @@ def _recover_stuck_jobs(sb: Client) -> list[str]:
 # Step 3: Claude analysis
 # ---------------------------------------------------------------------------
 
-def _claude_analysis(snapshot: dict, anthropic: Any) -> dict:
+def _claude_analysis(snapshot: dict, anthropic: Any, sb: Optional[Client] = None) -> dict:
     """
     Send the pipeline snapshot to Claude Sonnet and get structured recommendations.
     Falls back to a rule-based summary if Claude is unavailable.
@@ -260,6 +262,8 @@ def _claude_analysis(snapshot: dict, anthropic: Any) -> dict:
             messages=[{"role": "user", "content": user_msg}],
             timeout=45.0,
         )
+        if sb is not None:
+            clear_ai_error(sb, "anthropic")
         raw = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
         # Strip markdown fences if present
         if raw.startswith("```"):
@@ -269,6 +273,8 @@ def _claude_analysis(snapshot: dict, anthropic: Any) -> dict:
         return json.loads(raw.strip())
     except Exception as e:
         print(f"[master_agent] claude_analysis failed: {e}", flush=True)
+        if sb is not None:
+            record_ai_error(sb, "anthropic", str(e)[:500])
         # Rule-based fallback
         counts = snapshot.get("counts", {})
         failed = counts.get("failed_jobs", 0)
@@ -350,7 +356,7 @@ def run_master_agent(sb: Client, anthropic: Any) -> dict:
     # 3. Claude analysis
     analysis = {}
     try:
-        analysis = _claude_analysis(snapshot, anthropic)
+        analysis = _claude_analysis(snapshot, anthropic, sb)
         print(f"[master_agent] analysis health={analysis.get('health','?')}, "
               f"{len(analysis.get('actions', []))} actions", flush=True)
     except Exception as e:

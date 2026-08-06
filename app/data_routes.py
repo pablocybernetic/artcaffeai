@@ -26,6 +26,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from supabase import Client, create_client
 
+from ai_error_log import record_ai_error, clear_ai_error
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -436,10 +438,14 @@ def chat(req: ChatRequest):
             detail = "Anthropic API key is invalid or missing — check the backend's ANTHROPIC_API_KEY."
         else:
             detail = f"Claude API error ({e.status_code}): {msg[:300]}"
+        record_ai_error(sb, "anthropic", detail)
         raise HTTPException(status_code=502, detail=detail)
     except anthropic.APIConnectionError:
-        raise HTTPException(status_code=502, detail="Could not reach the Anthropic API — network issue, try again shortly.")
+        detail = "Could not reach the Anthropic API — network issue, try again shortly."
+        record_ai_error(sb, "anthropic", detail)
+        raise HTTPException(status_code=502, detail=detail)
 
+    clear_ai_error(sb, "anthropic")
     text = "".join(getattr(b, "text", "") for b in resp.content)
     chart = None
     if "CHART:" in text:
