@@ -419,12 +419,26 @@ def chat(req: ChatRequest):
     import anthropic  # type: ignore
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=25.0)
-    resp = client.messages.create(
-        model=DATA_AGENT_MODEL,
-        max_tokens=1500,
-        system=system,
-        messages=[{"role": m.role, "content": m.content} for m in req.messages],
-    )
+    try:
+        resp = client.messages.create(
+            model=DATA_AGENT_MODEL,
+            max_tokens=1500,
+            system=system,
+            messages=[{"role": m.role, "content": m.content} for m in req.messages],
+        )
+    except anthropic.APIStatusError as e:
+        msg = str(getattr(e, "message", "") or e)
+        if "credit balance" in msg.lower():
+            detail = "Anthropic API credit balance is too low — top up billing at console.anthropic.com to restore this feature."
+        elif e.status_code == 429:
+            detail = "Anthropic API rate limit reached — try again in a moment."
+        elif e.status_code == 401:
+            detail = "Anthropic API key is invalid or missing — check the backend's ANTHROPIC_API_KEY."
+        else:
+            detail = f"Claude API error ({e.status_code}): {msg[:300]}"
+        raise HTTPException(status_code=502, detail=detail)
+    except anthropic.APIConnectionError:
+        raise HTTPException(status_code=502, detail="Could not reach the Anthropic API — network issue, try again shortly.")
 
     text = "".join(getattr(b, "text", "") for b in resp.content)
     chart = None
