@@ -1290,6 +1290,7 @@ def customize_asset_layout(
     sb: Client,
     asset_id: str,
     layout: dict,
+    clean_source_override_url: str | None = None,
 ) -> dict:
     """
     Re-composite a single asset's headline/body text at explicit, user-chosen
@@ -1299,6 +1300,12 @@ def customize_asset_layout(
     headline_size_pct, headline_color, headline_align, body_text, body_x_pct,
     body_y_pct, body_size_pct, body_color, body_align, scrim_position,
     scrim_height_pct, scrim_opacity.
+
+    `clean_source_override_url`: pass the URL from a pending
+    preview_standardize_product_image() call to commit that standardized
+    (but not-yet-saved) image as the new clean source in this same Save —
+    lets "standardize then add text" happen in one atomic commit instead of
+    the standardize taking effect the moment its button is clicked.
 
     Every image asset is editable: if it has no clean pre-overlay source yet
     (metadata.overlay_source_url — e.g. a catalog photo or a full-AI-rendered
@@ -1322,7 +1329,7 @@ def customize_asset_layout(
         raise RuntimeError("Only image assets can be edited with the layout editor")
 
     metadata = asset.get("metadata") or {}
-    overlay_source_url = metadata.get("overlay_source_url")
+    overlay_source_url = clean_source_override_url or metadata.get("overlay_source_url")
     if not overlay_source_url:
         current_resp = httpx.get(asset["public_url"], timeout=30.0, follow_redirects=True)
         current_resp.raise_for_status()
@@ -1419,6 +1426,57 @@ def _pad_to_square_white(image_bytes: bytes, size: int = 1000, padding_pct: floa
     return buf.getvalue()
 
 
+def _run_standardize_transform(source_bytes: bytes, mode: str, openai_api_key: str) -> bytes:
+    """Shared by standardize_product_image() and its preview variant."""
+    source_bytes = _downscale_if_huge(source_bytes)
+    if mode == "openai":
+        oai_key = _resolve_openai_key(openai_api_key)
+        edited_bytes = _edit_openai(source_bytes, _PRODUCT_SHOT_PROMPT, "1024x1024", oai_key)
+        return _pad_to_square_white(edited_bytes, 1000)
+    return _pad_to_square_white(source_bytes, 1000)
+
+
+def preview_standardize_product_image(
+    *,
+    sb: Client,
+    asset_id: str,
+    mode: str = "simple",
+    openai_api_key: str = "",
+) -> dict:
+    """
+    Run the same standardize transform as standardize_product_image(), but
+    write the result to a NEW temporary storage object instead of the asset's
+    own path — nothing is committed. The layout editor shows this as a live
+    preview and only persists it if/when the user clicks Save (which passes
+    this preview_url back as clean_source_override_url to
+    customize_asset_layout()).
+    """
+    asset_res = (
+        sb.table("assets")
+        .select("id,public_url,asset_type,concept_id")
+        .eq("id", asset_id)
+        .single()
+        .execute()
+    )
+    if not asset_res.data:
+        raise RuntimeError(f"Asset not found: {asset_id}")
+    asset = asset_res.data
+    if asset.get("asset_type") != "image":
+        raise RuntimeError("Only image assets can be standardized")
+
+    resp = httpx.get(asset["public_url"], timeout=30.0, follow_redirects=True)
+    resp.raise_for_status()
+    source_bytes = resp.content
+    if len(source_bytes) > _MAX_SOURCE_BYTES:
+        raise RuntimeError(
+            f"Source image is too large to standardize ({len(source_bytes) // (1024*1024)} MB, "
+            f"max {_MAX_SOURCE_BYTES // (1024*1024)} MB)"
+        )
+    final_bytes = _run_standardize_transform(source_bytes, mode, openai_api_key)
+    _, _, preview_url = _upload_to_storage(sb, final_bytes, asset["concept_id"])
+    return {"ok": True, "preview_url": preview_url}
+
+
 def standardize_product_image(
     *,
     sb: Client,
@@ -1461,14 +1519,7 @@ def standardize_product_image(
             f"Source image is too large to standardize ({len(source_bytes) // (1024*1024)} MB, "
             f"max {_MAX_SOURCE_BYTES // (1024*1024)} MB)"
         )
-    source_bytes = _downscale_if_huge(source_bytes)
-
-    if mode == "openai":
-        oai_key = _resolve_openai_key(openai_api_key)
-        edited_bytes = _edit_openai(source_bytes, _PRODUCT_SHOT_PROMPT, "1024x1024", oai_key)
-        final_bytes = _pad_to_square_white(edited_bytes, 1000)
-    else:
-        final_bytes = _pad_to_square_white(source_bytes, 1000)
+    final_bytes = _run_standardize_transform(source_bytes, mode, openai_api_key)
 
     bucket, storage_path = _bucket_and_path_from_url(asset["public_url"])
     _upload_in_place(sb, bucket, storage_path, final_bytes, "image/png")

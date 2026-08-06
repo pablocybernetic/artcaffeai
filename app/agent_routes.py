@@ -15,6 +15,7 @@ Endpoints:
   GET    /agents/master/status        — latest Master Agent report
   POST   /agents/master/restart       — restart the API process (systemd Restart=always)
   POST   /agents/replace-asset-image  — swap an image asset's pixels, same URL/format
+  POST   /agents/preview-standardize-product-image — standardize to a temp preview, uncommitted
 """
 from __future__ import annotations
 
@@ -32,7 +33,7 @@ from job_runner import run_job
 from image_agent import (
     run_image_generation, run_banner_variants, select_best_asset, apply_overlay_to_asset,
     customize_headline_text, customize_asset_layout, standardize_product_image,
-    replace_asset_image,
+    preview_standardize_product_image, replace_asset_image,
     _bucket_and_path_from_url, _upload_in_place,
 )
 from image_analysis_agent import analyze_asset as _analyze_asset
@@ -145,6 +146,7 @@ class CustomizeAssetLayoutRequest(BaseModel):
     scrim_position: str = "bottom"     # "top" | "bottom" | "none"
     scrim_height_pct: float = 0.35
     scrim_opacity: float = 0.65
+    clean_source_override_url: str = ""   # from a pending preview-standardize-product-image call
 
 
 class StandardizeProductRequest(BaseModel):
@@ -929,11 +931,37 @@ def customize_asset_layout_endpoint(req: CustomizeAssetLayoutRequest):
         "scrim_opacity": req.scrim_opacity,
     }
     try:
-        return customize_asset_layout(sb=sb, asset_id=req.asset_id, layout=layout)
+        return customize_asset_layout(
+            sb=sb,
+            asset_id=req.asset_id,
+            layout=layout,
+            clean_source_override_url=req.clean_source_override_url or None,
+        )
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Layout customization failed: {e}")
+
+
+@router.post("/preview-standardize-product-image")
+def preview_standardize_product_image_endpoint(req: StandardizeProductRequest):
+    """
+    Preview-only: runs the standardize transform and writes it to a temp
+    storage object, WITHOUT touching the asset. Nothing is committed until
+    the layout editor's Save button passes the returned preview_url back as
+    clean_source_override_url to /customize-asset-layout.
+    """
+    try:
+        return preview_standardize_product_image(
+            sb=sb,
+            asset_id=req.asset_id,
+            mode=req.mode,
+            openai_api_key=req.openai_api_key,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Standardize preview failed: {e}")
 
 
 @router.post("/standardize-product-image")
