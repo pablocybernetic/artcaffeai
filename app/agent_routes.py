@@ -13,6 +13,7 @@ Endpoints:
   PATCH  /agents/items/{item_id}      — update content item status
   POST   /agents/master               — run Master Agent cycle (scan, recover, analyse)
   GET    /agents/master/status        — latest Master Agent report
+  POST   /agents/master/restart       — restart the API process (systemd Restart=always)
 """
 from __future__ import annotations
 
@@ -527,6 +528,26 @@ def get_master_status():
         "generated_at": row["created_at"],
         "report": row.get("result") or {},
     }
+
+
+@router.post("/master/restart")
+def restart_api_server():
+    """
+    Restart this API process. Relies on systemd's Restart=always (see
+    systemd/artcaffe-api.service) to bring it back up after we exit —
+    sends SIGTERM to the uvicorn master (our parent process) after a short
+    delay so this response has time to reach the client first.
+    """
+    import signal  # noqa: PLC0415
+    import threading  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    def _delayed_restart() -> None:
+        time.sleep(1.0)
+        os.kill(os.getppid(), signal.SIGTERM)
+
+    threading.Thread(target=_delayed_restart, daemon=True).start()
+    return {"ok": True, "message": "Restarting — back up in ~5-10s"}
 
 
 @router.get("/prompts")
