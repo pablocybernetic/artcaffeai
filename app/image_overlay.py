@@ -876,12 +876,14 @@ def overlay_freeform(
     headline_size_pct: float = 0.072,
     headline_color: str = "#FFFFFF",
     headline_align: str = "left",
+    headline_font: str = "",
     body_text: str = "",
     body_x_pct: float = 0.07,
     body_y_pct: float = 0.85,
     body_size_pct: float = 0.028,
     body_color: str = "#FFFFFF",
     body_align: str = "left",
+    body_font: str = "",
     scrim_position: str = "bottom",   # "top" | "bottom" | "none"
     scrim_height_pct: float = 0.35,
     scrim_opacity: float = 0.65,
@@ -907,8 +909,10 @@ def overlay_freeform(
         _HEADLINE_REQUIRED = ["Gotham-Medium.otf", "Gotham-Bold.otf"]
         default_h = font_names[0] if font_names else ""
         default_b = font_names[1] if len(font_names) > 1 else default_h
-        h_fname = next((f for f in _HEADLINE_REQUIRED if f in font_names), default_h)
-        b_fname = next((f for f in font_names if f != h_fname), default_b)
+        auto_h = next((f for f in _HEADLINE_REQUIRED if f in font_names), default_h)
+        h_fname = headline_font if headline_font in font_names else auto_h
+        auto_b = next((f for f in font_names if f != h_fname), default_b)
+        b_fname = body_font if body_font in font_names else auto_b
 
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         W, H = img.size

@@ -137,6 +137,7 @@ class TextLayerParams(BaseModel):
     size_pct: float = 0.072
     color: str = "#FFFFFF"
     align: str = "left"   # "left" | "center"
+    font: str = ""        # uploaded font filename, e.g. "Gotham-Medium.otf" — "" = auto-pick
 
 
 class CustomizeAssetLayoutRequest(BaseModel):
@@ -920,12 +921,14 @@ def customize_asset_layout_endpoint(req: CustomizeAssetLayoutRequest):
         "headline_size_pct": req.headline.size_pct,
         "headline_color": req.headline.color,
         "headline_align": req.headline.align,
+        "headline_font": req.headline.font,
         "body_text": req.body.text,
         "body_x_pct": req.body.x_pct,
         "body_y_pct": req.body.y_pct,
         "body_size_pct": req.body.size_pct,
         "body_color": req.body.color,
         "body_align": req.body.align,
+        "body_font": req.body.font,
         "scrim_position": req.scrim_position,
         "scrim_height_pct": req.scrim_height_pct,
         "scrim_opacity": req.scrim_opacity,
