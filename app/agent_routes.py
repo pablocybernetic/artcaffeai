@@ -14,6 +14,7 @@ Endpoints:
   POST   /agents/master               — run Master Agent cycle (scan, recover, analyse)
   GET    /agents/master/status        — latest Master Agent report
   POST   /agents/master/restart       — restart the API process (systemd Restart=always)
+  POST   /agents/replace-asset-image  — swap an image asset's pixels, same URL/format
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, UploadFile
 from pydantic import BaseModel
 from supabase import Client, create_client
 
@@ -31,6 +32,7 @@ from job_runner import run_job
 from image_agent import (
     run_image_generation, run_banner_variants, select_best_asset, apply_overlay_to_asset,
     customize_headline_text, customize_asset_layout, standardize_product_image,
+    replace_asset_image,
     _bucket_and_path_from_url, _upload_in_place,
 )
 from image_analysis_agent import analyze_asset as _analyze_asset
@@ -953,3 +955,22 @@ def standardize_product_image_endpoint(req: StandardizeProductRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Product standardization failed: {e}")
+
+
+@router.post("/replace-asset-image")
+async def replace_asset_image_endpoint(
+    asset_id: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """
+    Swap an image asset's pixel content for a new upload — same public_url,
+    storage path, name, and brand tags. Re-encodes the upload to match the
+    asset's existing file format (png/jpg/webp).
+    """
+    content = await file.read()
+    try:
+        return replace_asset_image(sb=sb, asset_id=asset_id, new_image_bytes=content)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Image replace failed: {e}")

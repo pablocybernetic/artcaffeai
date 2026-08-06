@@ -1482,3 +1482,71 @@ def standardize_product_image(
     }).eq("id", asset_id).execute()
 
     return {"ok": True, "asset": {**asset, "metadata": new_metadata}}
+
+
+_IMAGE_FORMAT_BY_EXT = {
+    "png": ("PNG", "image/png"),
+    "jpg": ("JPEG", "image/jpeg"),
+    "jpeg": ("JPEG", "image/jpeg"),
+    "webp": ("WEBP", "image/webp"),
+}
+
+
+def replace_asset_image(*, sb: Client, asset_id: str, new_image_bytes: bytes) -> dict:
+    """
+    Swap an image asset's pixel content for a new upload while keeping its
+    public_url, storage path, name, and brand tags exactly as they are.
+
+    The new image is re-encoded to match the EXISTING asset's file extension
+    (png/jpg/webp) so the URL's format claim stays accurate regardless of what
+    format the replacement file was in. Clears metadata.overlay_source_url —
+    any previously saved layout state referred to the old pixels and no
+    longer applies.
+    """
+    import io as _io
+    from PIL import Image
+
+    asset_res = (
+        sb.table("assets")
+        .select("id,metadata,public_url,asset_type")
+        .eq("id", asset_id)
+        .single()
+        .execute()
+    )
+    if not asset_res.data:
+        raise RuntimeError(f"Asset not found: {asset_id}")
+    asset = asset_res.data
+    if asset.get("asset_type") != "image":
+        raise RuntimeError("Only image assets can be replaced with this action")
+
+    if len(new_image_bytes) > _MAX_SOURCE_BYTES:
+        raise RuntimeError(
+            f"New image is too large ({len(new_image_bytes) // (1024*1024)} MB, "
+            f"max {_MAX_SOURCE_BYTES // (1024*1024)} MB)"
+        )
+    new_image_bytes = _downscale_if_huge(new_image_bytes)
+
+    bucket, storage_path = _bucket_and_path_from_url(asset["public_url"])
+    ext = storage_path.rsplit(".", 1)[-1].lower() if "." in storage_path else "png"
+    pil_format, content_type = _IMAGE_FORMAT_BY_EXT.get(ext, ("PNG", "image/png"))
+
+    img = Image.open(_io.BytesIO(new_image_bytes))
+    if pil_format == "JPEG" and img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
+    buf = _io.BytesIO()
+    img.save(buf, format=pil_format)
+    final_bytes = buf.getvalue()
+
+    _upload_in_place(sb, bucket, storage_path, final_bytes, content_type)
+
+    metadata = asset.get("metadata") or {}
+    new_metadata = {**metadata}
+    new_metadata.pop("overlay_source_url", None)
+    sb.table("assets").update({
+        "metadata": new_metadata,
+        "mime_type": content_type,
+        "file_size_bytes": len(final_bytes),
+        "updated_at": _now(),
+    }).eq("id", asset_id).execute()
+
+    return {"ok": True, "asset": {**asset, "metadata": new_metadata}}
