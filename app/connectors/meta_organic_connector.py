@@ -182,7 +182,44 @@ def sync_meta_organic(
         except Exception as e:
             print(f"[meta_organic] could not fetch page token: {e}", flush=True)
 
-        # Step 4c: Page insights — fetch each metric individually so one bad name
+        # Step 4c: Page posts — fetch + archive into social_posts (mirrors the
+        # Instagram media archiving above), so the Dashboard's "All posts"
+        # browser has Facebook history too.
+        try:
+            fb_posts_resp = _get(f"{GRAPH_BASE}/{page_id}/posts", {
+                "access_token": page_token,
+                "fields": "id,message,created_time,permalink_url,full_picture,likes.summary(true),comments.summary(true),shares",
+                "limit": "50",
+            })
+            fb_raw_posts = fb_posts_resp.get("data", [])
+            fb_post_rows = [
+                {
+                    "concept_id": concept_id,
+                    "platform": "facebook",
+                    "post_id": p["id"],
+                    "media_type": "post",
+                    "caption": p.get("message"),
+                    "permalink": p.get("permalink_url"),
+                    "media_url": p.get("full_picture"),
+                    "thumbnail_url": p.get("full_picture"),
+                    "posted_at": p.get("created_time"),
+                    "like_count": int(((p.get("likes") or {}).get("summary") or {}).get("total_count") or 0),
+                    "comments_count": int(((p.get("comments") or {}).get("summary") or {}).get("total_count") or 0),
+                    "insights": {"shares": int((p.get("shares") or {}).get("count") or 0)},
+                    "synced_at": end_dt.isoformat(),
+                }
+                for p in fb_raw_posts
+            ]
+            if fb_post_rows:
+                sb.table("social_posts").upsert(
+                    fb_post_rows,
+                    on_conflict="concept_id,platform,post_id",
+                ).execute()
+                print(f"[meta_organic] upserted {len(fb_post_rows)} FB posts into social_posts", flush=True)
+        except Exception as e:
+            print(f"[meta_organic] FB posts fetch failed: {e}", flush=True)
+
+        # Step 4d: Page insights — fetch each metric individually so one bad name
         # doesn't kill the whole call (Meta API v21.0 is strict on metric names).
         METRIC_CANDIDATES = [
             ("page_impressions",        "day"),

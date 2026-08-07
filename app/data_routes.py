@@ -329,6 +329,33 @@ def _snapshot_concept(concept_id: str) -> dict:
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+@router.get("/social-posts")
+def get_social_posts(
+    concept_id: Optional[str] = None,
+    platform: Optional[str] = None,   # "instagram" | "facebook" | None = both
+    start: Optional[str] = None,      # YYYY-MM-DD
+    end: Optional[str] = None,        # YYYY-MM-DD
+    limit: int = 200,
+):
+    """
+    Browse the full archive of Instagram + Facebook posts ever synced
+    (social_posts is upserted by every /data/ads/meta/organic/sync run, so
+    it accumulates history beyond whatever the latest snapshot's date
+    window covers). Supports filtering by concept, platform, and date range.
+    """
+    q = sb.table("social_posts").select("*").order("posted_at", desc=True).limit(min(limit, 500))
+    if concept_id:
+        q = q.eq("concept_id", concept_id)
+    if platform:
+        q = q.eq("platform", platform)
+    if start:
+        q = q.gte("posted_at", start)
+    if end:
+        q = q.lte("posted_at", f"{end}T23:59:59")
+    res = q.execute()
+    return {"ok": True, "posts": res.data or []}
+
+
 @router.post("/snapshot")
 def snapshot(req: SnapshotRequest):
     """Pull BigQuery data and upsert snapshots for one or all concepts."""
