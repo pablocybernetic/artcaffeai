@@ -207,14 +207,19 @@ def notify_approval_needed_to_team(
     Writes one notifications row per recipient and sends emails.
     Returns the number of emails successfully delivered.
     """
-    members_res = (
-        sb.table("team_members")
-        .select("id,email,full_name")
-        .in_("role", ["admin", "content_manager"])
-        .eq("is_active", True)
-        .execute()
-    )
-    members = members_res.data or []
+    role_ids_res = sb.table("roles").select("id").in_("slug", ["admin", "content_manager"]).execute()
+    role_ids = [r["id"] for r in (role_ids_res.data or [])]
+
+    members: list[dict] = []
+    if role_ids:
+        members_res = (
+            sb.table("team_members")
+            .select("id,email,full_name")
+            .in_("role_id", role_ids)
+            .eq("is_active", True)
+            .execute()
+        )
+        members = members_res.data or []
 
     sent = 0
     for m in members:
