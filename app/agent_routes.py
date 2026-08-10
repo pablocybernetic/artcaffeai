@@ -148,6 +148,7 @@ class CustomizeAssetLayoutRequest(BaseModel):
     scrim_height_pct: float = 0.35
     scrim_opacity: float = 0.65
     clean_source_override_url: str = ""   # from a pending preview-standardize-product-image call
+    save_as_new: bool = False             # write a new asset copy instead of editing in place
 
 
 class StandardizeProductRequest(BaseModel):
@@ -939,6 +940,7 @@ def customize_asset_layout_endpoint(req: CustomizeAssetLayoutRequest):
             asset_id=req.asset_id,
             layout=layout,
             clean_source_override_url=req.clean_source_override_url or None,
+            save_as_new=req.save_as_new,
         )
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))

@@ -1291,6 +1291,7 @@ def customize_asset_layout(
     asset_id: str,
     layout: dict,
     clean_source_override_url: str | None = None,
+    save_as_new: bool = False,
 ) -> dict:
     """
     Re-composite a single asset's headline/body text at explicit, user-chosen
@@ -1307,7 +1308,17 @@ def customize_asset_layout(
     lets "standardize then add text" happen in one atomic commit instead of
     the standardize taking effect the moment its button is clicked.
 
-    Every image asset is editable: if it has no clean pre-overlay source yet
+    `save_as_new`: when True, the composited result is written to a BRAND
+    NEW assets row/storage object instead of overwriting this one — used
+    when editing an image from Ideation, where the source asset may be a
+    shared reference photo other content items still point to. The original
+    is left completely untouched; the response's `asset` is the new row, and
+    the caller (frontend) is responsible for re-tagging whichever
+    content_item pointed at the original asset_id to point at the new one
+    instead.
+
+    Otherwise (the default, used by the Assets page), every image asset is
+    editable: if it has no clean pre-overlay source yet
     (metadata.overlay_source_url — e.g. a catalog photo or a full-AI-rendered
     poster that never went through the PIL overlay pipeline), its CURRENT
     image is snapshotted once as that clean source before the first edit, so
@@ -1317,7 +1328,7 @@ def customize_asset_layout(
     """
     asset_res = (
         sb.table("assets")
-        .select("id,metadata,public_url,asset_type,concept_id")
+        .select("id,filename,metadata,public_url,asset_type,concept_id")
         .eq("id", asset_id)
         .single()
         .execute()
@@ -1361,18 +1372,38 @@ def customize_asset_layout(
         scrim_opacity=layout.get("scrim_opacity", 0.65),
     )
 
+    new_metadata = {**metadata, **layout, "overlay_source_url": overlay_source_url}
+
+    if save_as_new:
+        _, new_storage_path, new_public_url = _upload_to_storage(sb, composited, asset["concept_id"])
+        insert_res = (
+            sb.table("assets")
+            .insert({
+                "concept_id": asset["concept_id"],
+                "filename": asset.get("filename") or "edited-image.png",
+                "asset_type": "image",
+                "storage_path": new_storage_path,
+                "public_url": new_public_url,
+                "mime_type": "image/png",
+                "file_size_bytes": len(composited),
+                "metadata": {**new_metadata, "duplicated_from": asset_id},
+            })
+            .execute()
+        )
+        new_asset = insert_res.data[0]
+        return {"ok": True, "asset": new_asset, "is_new_copy": True}
+
     # Overwrite the asset's existing storage object in place — same
     # bucket/path means its public_url never changes.
     bucket, storage_path = _bucket_and_path_from_url(asset["public_url"])
     _upload_in_place(sb, bucket, storage_path, composited, "image/png")
 
-    new_metadata = {**metadata, **layout, "overlay_source_url": overlay_source_url}
     sb.table("assets").update({
         "metadata": new_metadata,
         "updated_at": _now(),
     }).eq("id", asset_id).execute()
 
-    return {"ok": True, "asset": {**asset, "metadata": new_metadata}}
+    return {"ok": True, "asset": {**asset, "metadata": new_metadata}, "is_new_copy": False}
 
 
 # ---------------------------------------------------------------------------
