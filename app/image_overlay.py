@@ -944,6 +944,7 @@ def overlay_freeform(
         overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         d = ImageDraw.Draw(overlay)
 
+        headline_bottom = None
         if headline_text:
             h_size = max(16, int(W * headline_size_pct))
             h_font = _pil_font(font_map.get(h_fname), h_size)
@@ -951,7 +952,7 @@ def overlay_freeform(
             hx     = int(W * headline_x_pct)
             hy     = int(H * headline_y_pct)
             max_w  = int(W * 0.86) if headline_align == "center" else W - hx - int(W * 0.05)
-            _draw_positioned_text(d, headline_text.upper(), h_font, hx, hy, max_w, h_rgb, headline_align, shadow=True)
+            headline_bottom = _draw_positioned_text(d, headline_text.upper(), h_font, hx, hy, max_w, h_rgb, headline_align, shadow=True)
 
         if body_text:
             b_size = max(12, int(W * body_size_pct))
@@ -959,6 +960,13 @@ def overlay_freeform(
             b_rgb  = _hex_to_rgb(body_color) if body_color.startswith("#") else _hex_to_rgb(_DEFAULT_COLOR)
             bx     = int(W * body_x_pct)
             by     = int(H * body_y_pct)
+            # A long headline can wrap to multiple lines and run past where
+            # the body was positioned to start — nudge body down below the
+            # headline's actual rendered bottom rather than overlapping it.
+            # Only when body was meant to sit below/at the headline; a body
+            # deliberately placed above the headline is left alone.
+            if headline_bottom is not None and by >= hy and by < headline_bottom:
+                by = headline_bottom + max(6, int(H * 0.01))
             max_w  = int(W * 0.86) if body_align == "center" else W - bx - int(W * 0.05)
             _draw_positioned_text(d, body_text, b_font, bx, by, max_w, b_rgb, body_align, shadow=True)
 
