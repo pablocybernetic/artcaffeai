@@ -192,3 +192,70 @@ def sync_meta_organic_endpoint(req: AdsSyncRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Meta organic sync failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Post comments (fetched live on demand — not stored, only the count is)
+# ---------------------------------------------------------------------------
+@router.get("/meta/organic/comments")
+def get_post_comments_endpoint(post_id: str, platform: str, concept_id: str):
+    """Fetch a post's actual comment text from Meta, live. social_posts only
+    stores comments_count from the sync — the text is pulled here on demand
+    when a user opens a post's detail view, avoiding an extra API call per
+    post on every sync for comments most posts' viewers never open."""
+    from connectors.meta_organic_connector import GRAPH_BASE, _get  # noqa: PLC0415
+
+    creds = _get_creds("meta", concept_id=concept_id)
+    access_token = creds.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Meta access_token not configured")
+
+    try:
+        token = access_token
+        if platform == "facebook":
+            # Facebook (not Instagram) requires a page-scoped token to read comments.
+            page_id = creds.get("page_id") or ""
+            if page_id:
+                try:
+                    accounts_resp = _get(f"{GRAPH_BASE}/me/accounts", {
+                        "access_token": access_token,
+                        "fields": "id,access_token",
+                    })
+                    for acct in accounts_resp.get("data", []):
+                        if str(acct.get("id")) == str(page_id):
+                            token = acct["access_token"]
+                            break
+                except Exception:  # noqa: BLE001
+                    pass
+            resp = _get(f"{GRAPH_BASE}/{post_id}/comments", {
+                "access_token": token,
+                "fields": "message,from,created_time",
+            })
+            comments = [
+                {
+                    "id": c.get("id"),
+                    "text": c.get("message"),
+                    "author": (c.get("from") or {}).get("name"),
+                    "timestamp": c.get("created_time"),
+                }
+                for c in resp.get("data", [])
+            ]
+        else:
+            resp = _get(f"{GRAPH_BASE}/{post_id}/comments", {
+                "access_token": token,
+                "fields": "text,username,timestamp",
+            })
+            comments = [
+                {
+                    "id": c.get("id"),
+                    "text": c.get("text"),
+                    "author": c.get("username"),
+                    "timestamp": c.get("timestamp"),
+                }
+                for c in resp.get("data", [])
+            ]
+        return {"ok": True, "comments": comments}
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch comments: {e}")
