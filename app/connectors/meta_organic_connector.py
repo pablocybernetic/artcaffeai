@@ -30,6 +30,27 @@ def _get(url: str, params: dict, timeout: float = 30.0) -> dict:
     return resp.json()
 
 
+def _carousel_cover(media_id: str, access_token: str) -> dict:
+    """CAROUSEL_ALBUM nodes never populate media_url/thumbnail_url on the
+    parent — the actual images/videos only exist on child items behind the
+    /children edge. Fetch the first child to use as the album's cover."""
+    try:
+        resp = _get(f"{GRAPH_BASE}/{media_id}/children", {
+            "access_token": access_token,
+            "fields": "media_type,media_url,thumbnail_url",
+        })
+        children = resp.get("data", [])
+        if not children:
+            return {}
+        first = children[0]
+        return {
+            "media_url": first.get("media_url"),
+            "thumbnail_url": first.get("thumbnail_url") or first.get("media_url"),
+        }
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _post_insights(post_id: str, access_token: str, media_type: str) -> dict:
     """Fetch per-post insights — metric set differs by media type."""
     if media_type == "VIDEO":
@@ -112,6 +133,8 @@ def sync_meta_organic(
     # Enrich all posts with per-post insights (stored in DB regardless of date range)
     all_posts: list[dict[str, Any]] = []
     for p in raw_posts:
+        if p.get("media_type") == "CAROUSEL_ALBUM" and not p.get("media_url"):
+            p = {**p, **_carousel_cover(p["id"], access_token)}
         insights = _post_insights(p["id"], access_token, p.get("media_type", "IMAGE"))
         all_posts.append({**p, "insights": insights})
 
