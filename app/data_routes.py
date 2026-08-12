@@ -56,8 +56,19 @@ router = APIRouter(prefix="/data", dependencies=[Depends(require_api_key)])
 DATA_AGENT_MODEL = "claude-sonnet-4-6"
 DATA_AGENT_SYSTEM_PROMPT = (
     "You are the Artcaffe Data Agent. Answer questions about platform performance "
-    "using ONLY the snapshot data provided below. Be concise and direct. "
+    "using ONLY the data provided below. Be concise and direct. "
     "If the data doesn't contain the answer, say so plainly.\n\n"
+    "[TODAY injected at runtime]\n\n"
+    "POST-LEVEL QUESTIONS — for questions about individual social posts (e.g. "
+    "\"how many likes/comments did we get yesterday\", \"what was our best post last week\", "
+    "\"how many posts went out on Instagram this month\"), use the SOCIAL_POSTS array below, "
+    "not the SNAPSHOTS totals. Each entry has platform, posted_at (ISO date), like_count, "
+    "comments_count, media_type, and caption. Filter/sum by posted_at yourself relative to "
+    "the TODAY date above — e.g. \"yesterday\" means posted_at falls on TODAY minus one day. "
+    "Sum like_count/comments_count across all matching posts (both instagram and facebook, "
+    "unless the question specifies one platform).\n\n"
+    "AGGREGATE QUESTIONS — for followers, reach, impressions, ad spend, and other rolled-up "
+    "totals, use the SNAPSHOTS data instead — those aren't available per-post.\n\n"
     "CURRENCY RULE — all monetary values in the data are in Kenyan Shillings. "
     "Always display currency amounts with the 'KES' prefix (e.g. KES 70,535). "
     "Never use '$', 'USD', or any other currency symbol.\n\n"
@@ -69,7 +80,8 @@ DATA_AGENT_SYSTEM_PROMPT = (
     "- Multi-series example: CHART: {\"type\":\"bar\",\"title\":\"Sessions vs Users\",\"data\":[{\"name\":\"Mon\",\"sessions\":120,\"users\":80}]}\n"
     "- NEVER use Chart.js format (labels/datasets arrays). ONLY the flat array format above.\n"
     "- Output any CHART: line AFTER your text answer, not before.\n\n"
-    "[SNAPSHOTS injected at runtime]"
+    "[SNAPSHOTS injected at runtime]\n\n"
+    "[SOCIAL_POSTS injected at runtime]"
 )
 
 
@@ -444,6 +456,27 @@ def chat(req: ChatRequest):
     slimmed = [_slim(s) for s in snapshots]
     context_blob = json.dumps(slimmed, default=str)[:200_000]
     system = DATA_AGENT_SYSTEM_PROMPT.replace("[SNAPSHOTS injected at runtime]", f"SNAPSHOTS:\n{context_blob}")
+    system = system.replace("[TODAY injected at runtime]", f"TODAY: {date.today().isoformat()}")
+
+    # Post-level data (likes/comments/captions per post) — platform_data_snapshots
+    # only holds rolled-up totals for the window it was last synced with, so
+    # "how many likes did we get yesterday"-style questions need the raw rows.
+    posts_cutoff = (date.today() - timedelta(days=120)).isoformat()
+    posts_q = (
+        sb.table("social_posts")
+        .select("platform,posted_at,like_count,comments_count,media_type,caption")
+        .gte("posted_at", posts_cutoff)
+        .order("posted_at", desc=True)
+        .limit(300)
+    )
+    if req.concept_id:
+        posts_q = posts_q.eq("concept_id", req.concept_id)
+    posts = posts_q.execute().data or []
+    for p in posts:
+        if p.get("caption") and len(p["caption"]) > 200:
+            p["caption"] = p["caption"][:200] + "…"
+    posts_blob = json.dumps(posts, default=str)[:100_000]
+    system = system.replace("[SOCIAL_POSTS injected at runtime]", f"SOCIAL_POSTS:\n{posts_blob}")
 
     import anthropic  # type: ignore
 
