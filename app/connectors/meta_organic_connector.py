@@ -83,12 +83,15 @@ def sync_meta_organic(
     instagram_account_id: str,
     page_id: str = "",
     date_range_days: int = 28,
+    end_date: str | None = None,
 ) -> dict[str, Any]:
     """
     Pull Instagram Business + Facebook Page organic metrics.
     Upserts a snapshot row and returns the summary dict.
+    end_date (YYYY-MM-DD) lets the dashboard's date-range filter request a
+    window not ending today — defaults to today when omitted.
     """
-    end_dt = date.today()
+    end_dt = date.fromisoformat(end_date) if end_date else date.today()
     start_dt = end_dt - timedelta(days=date_range_days - 1)
 
     # ------------------------------------------------------------------
@@ -318,12 +321,11 @@ def sync_meta_organic(
         "facebook_page": fb_page,
     }
 
-    today = date.today().isoformat()
     sb.table("platform_data_snapshots").upsert(
         {
             "concept_id": concept_id,
             "platform": "meta_organic",
-            "snapshot_date": today,
+            "snapshot_date": end_dt.isoformat(),
             "summary_json": summary,
         },
         on_conflict="concept_id,platform,snapshot_date",

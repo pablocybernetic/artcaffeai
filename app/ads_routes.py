@@ -52,6 +52,7 @@ def _get_creds(platform: str, concept_id: Optional[str] = None) -> dict:
 class AdsSyncRequest(BaseModel):
     concept_id: str
     date_range_days: int = 7
+    end_date: Optional[str] = None  # YYYY-MM-DD; meta_organic only — window ends here instead of today
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +172,7 @@ def sync_meta_organic_endpoint(req: AdsSyncRequest):
             instagram_account_id=instagram_account_id,
             page_id=page_id,
             date_range_days=req.date_range_days,
+            end_date=req.end_date,
         )
         ig = summary.get("instagram", {})
         totals = ig.get("totals", {})
