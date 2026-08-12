@@ -49,6 +49,9 @@ Rules:
 - Use the brand's voice tone words. Avoid anything in voice.dont / vocabulary.avoid.
 - Reference at least one messaging pillar in every idea's rationale.
 - Every idea must feel premium, warm, and distinctly Artcaffe.
+- If RECENTLY PUBLISHED POSTS is provided, do not repeat the same headline, hook, or
+  angle as any post listed there — pick a fresh angle. You may still draw inspiration
+  from themes that performed well (high like/comment counts).
 - For asset_ids: pick 1-2 asset UUIDs from the AVAILABLE ASSETS list that best fit the idea visually.
   Use the desc, tags, mood, food, scene, style, and people fields to make precise matches.
   Use exact UUIDs only. If no asset fits well, use an empty array [].
@@ -82,6 +85,41 @@ def _fetch_assets(sb: Client, concept_id: str) -> list[dict]:
         .execute()
     )
     return res.data or []
+
+
+def _fetch_recent_posts(sb: Client, concept_id: str, limit: int = 15) -> list[dict]:
+    """Fetch recently published posts for this concept so ideation sees what's
+    already gone out — avoids repeating the same angle and can lean into
+    themes that measurably performed well."""
+    res = (
+        sb.table("social_posts")
+        .select("platform,caption,media_type,posted_at,like_count,comments_count")
+        .eq("concept_id", concept_id)
+        .order("posted_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return res.data or []
+
+
+def _build_recent_posts_section(posts: list[dict]) -> str:
+    if not posts:
+        return ""
+    lines = [
+        "",
+        "RECENTLY PUBLISHED POSTS (avoid repeating these angles — you may build on ones that performed well):",
+    ]
+    for p in posts:
+        caption = (p.get("caption") or "").strip().replace("\n", " ")
+        if len(caption) > 160:
+            caption = caption[:160] + "…"
+        platform = p.get("platform") or "?"
+        likes = p.get("like_count") or 0
+        comments = p.get("comments_count") or 0
+        date = (p.get("posted_at") or "")[:10]
+        lines.append(f"- [{platform} · {date} · {likes} likes, {comments} comments] {caption or '(no caption)'}")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _build_asset_section(assets: list[dict]) -> str:
@@ -171,6 +209,11 @@ def run_ideation(
     assets_ctx = load_brand_assets_context(sb, anthropic)
     brand_assets_block = format_for_ideation(assets_ctx)
 
+    # 3c. Recently published posts — real content already live, used to steer
+    # new ideas away from repeats and toward angles that measurably work.
+    recent_posts = _fetch_recent_posts(sb, concept_id)
+    recent_posts_block = _build_recent_posts_section(recent_posts)
+
     # 4. Build prompt
     brief_text = (
         brief.get("agent_brief")
@@ -191,6 +234,9 @@ def run_ideation(
 
     if brand_assets_block:
         user_parts += ["", brand_assets_block]
+
+    if recent_posts_block:
+        user_parts += ["", recent_posts_block]
 
     if brief.get("research_summary"):
         user_parts += ["", f"RESEARCH SUMMARY:\n{brief['research_summary']}"]
