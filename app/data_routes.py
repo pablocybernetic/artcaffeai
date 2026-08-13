@@ -68,7 +68,10 @@ DATA_AGENT_SYSTEM_PROMPT = (
     "Sum like_count/comments_count across all matching posts (both instagram and facebook, "
     "unless the question specifies one platform).\n\n"
     "AGGREGATE QUESTIONS — for followers, reach, impressions, ad spend, and other rolled-up "
-    "totals, use the SNAPSHOTS data instead — those aren't available per-post.\n\n"
+    "totals, use the SNAPSHOTS data instead — those aren't available per-post. For \"how long "
+    "until checkout\"-style questions, use the ga4 snapshot's checkout_funnel field "
+    "(avg_seconds_to_checkout, median_seconds_to_checkout, sessions_reaching_checkout) — convert "
+    "seconds to minutes:seconds when answering.\n\n"
     "CURRENCY RULE — all monetary values in the data are in Kenyan Shillings. "
     "Always display currency amounts with the 'KES' prefix (e.g. KES 70,535). "
     "Never use '$', 'USD', or any other currency symbol.\n\n"
@@ -171,9 +174,42 @@ def _pull_ga4(project: str, dataset: str) -> dict[str, Any]:
     LIMIT 20
     """
 
-    daily    = [dict(r) for r in client.query(daily_sql).result()]
-    channels = [dict(r) for r in client.query(channel_sql).result()]
-    pages    = [dict(r) for r in client.query(pages_sql).result()]
+    # --- average time from session start to begin_checkout ---
+    checkout_funnel_sql = f"""
+    WITH sessioned AS (
+      SELECT
+        user_pseudo_id,
+        (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+        event_name,
+        event_timestamp
+      FROM {tbl}
+      WHERE _TABLE_SUFFIX BETWEEN '{start_sfx}' AND '{end_sfx}'
+        AND event_name IN ('session_start', 'begin_checkout')
+    ),
+    per_session AS (
+      SELECT
+        user_pseudo_id,
+        session_id,
+        MIN(IF(event_name = 'session_start', event_timestamp, NULL)) AS start_ts,
+        MIN(IF(event_name = 'begin_checkout', event_timestamp, NULL)) AS checkout_ts
+      FROM sessioned
+      GROUP BY user_pseudo_id, session_id
+    )
+    SELECT
+      COUNT(*) AS sessions_reaching_checkout,
+      ROUND(AVG((checkout_ts - start_ts) / 1000000), 1) AS avg_seconds_to_checkout,
+      ROUND(APPROX_QUANTILES((checkout_ts - start_ts) / 1000000, 2)[OFFSET(1)], 1) AS median_seconds_to_checkout
+    FROM per_session
+    WHERE start_ts IS NOT NULL AND checkout_ts IS NOT NULL AND checkout_ts >= start_ts
+    """
+
+    daily           = [dict(r) for r in client.query(daily_sql).result()]
+    channels        = [dict(r) for r in client.query(channel_sql).result()]
+    pages           = [dict(r) for r in client.query(pages_sql).result()]
+    checkout_rows   = [dict(r) for r in client.query(checkout_funnel_sql).result()]
+    checkout_funnel = checkout_rows[0] if checkout_rows else {
+        "sessions_reaching_checkout": 0, "avg_seconds_to_checkout": None, "median_seconds_to_checkout": None,
+    }
 
     totals = {
         "sessions":    sum(r["sessions"]    for r in daily),
@@ -189,6 +225,7 @@ def _pull_ga4(project: str, dataset: str) -> dict[str, Any]:
         "daily":     daily,
         "channels":  channels,
         "top_pages": pages,
+        "checkout_funnel": checkout_funnel,
     }
 
 
@@ -415,6 +452,7 @@ def _slim(snapshot: dict) -> dict:
             "totals":    summary.get("totals"),
             "channels":  (summary.get("channels") or [])[:5],
             "top_pages": (summary.get("top_pages") or [])[:5],
+            "checkout_funnel": summary.get("checkout_funnel"),
         }
     elif "paid" in platform:
         paid = summary.get("paid_ads") or {}
