@@ -80,7 +80,7 @@ def sync_meta_organic(
     sb: Client,
     concept_id: str,
     access_token: str,
-    instagram_account_id: str,
+    instagram_account_id: str = "",
     page_id: str = "",
     date_range_days: int = 28,
     end_date: str | None = None,
@@ -95,88 +95,88 @@ def sync_meta_organic(
     start_dt = end_dt - timedelta(days=date_range_days - 1)
 
     # ------------------------------------------------------------------
-    # 1. Instagram account info
+    # 1-3b. Instagram (optional — concepts with only a Facebook Page
+    # configured skip all of this and still get a valid summary below)
     # ------------------------------------------------------------------
-    account = _get(f"{GRAPH_BASE}/{instagram_account_id}", {
-        "access_token": access_token,
-        "fields": "followers_count,media_count,name,username,biography",
-    })
-
-    # ------------------------------------------------------------------
-    # 2. Instagram account-level insights (reach, impressions, profile views)
-    # ------------------------------------------------------------------
+    account: dict[str, Any] = {}
     ig_insights: dict[str, Any] = {}
-    try:
-        insights_resp = _get(f"{GRAPH_BASE}/{instagram_account_id}/insights", {
-            "access_token": access_token,
-            "metric": "impressions,reach,profile_views",
-            "period": "day",
-            "since": start_dt.isoformat(),
-            "until": end_dt.isoformat(),
-        })
-        for metric in insights_resp.get("data", []):
-            vals = metric.get("values") or []
-            ig_insights[metric["name"]] = {
-                "total": sum(v.get("value", 0) for v in vals),
-                "daily": [{"date": v.get("end_time", "")[:10], "value": v.get("value", 0)} for v in vals],
-            }
-    except Exception:  # noqa: BLE001
-        pass
-
-    # ------------------------------------------------------------------
-    # 3. Recent media (posts + reels) — fetch up to 50 for DB archiving
-    # ------------------------------------------------------------------
-    media_resp = _get(f"{GRAPH_BASE}/{instagram_account_id}/media", {
-        "access_token": access_token,
-        "fields": "id,caption,media_type,timestamp,like_count,comments_count,media_url,thumbnail_url,permalink",
-        "limit": "50",
-    })
-    raw_posts = media_resp.get("data", [])
-
-    # Enrich all posts with per-post insights (stored in DB regardless of date range)
+    posts: list[dict[str, Any]] = []
     all_posts: list[dict[str, Any]] = []
-    for p in raw_posts:
-        if p.get("media_type") == "CAROUSEL_ALBUM" and not p.get("media_url"):
-            p = {**p, **_carousel_cover(p["id"], access_token)}
-        insights = _post_insights(p["id"], access_token, p.get("media_type", "IMAGE"))
-        all_posts.append({**p, "insights": insights})
 
-    # Filter to date range for dashboard stats
-    posts: list[dict[str, Any]] = [
-        p for p in all_posts
-        if p.get("timestamp", "")[:10] >= start_dt.isoformat()
-    ]
+    if instagram_account_id:
+        # 1. Instagram account info
+        account = _get(f"{GRAPH_BASE}/{instagram_account_id}", {
+            "access_token": access_token,
+            "fields": "followers_count,media_count,name,username,biography",
+        })
 
-    # ------------------------------------------------------------------
-    # 3b. Upsert individual posts into social_posts for AI system knowledge
-    # ------------------------------------------------------------------
-    if all_posts:
-        post_rows = [
-            {
-                "concept_id": concept_id,
-                "platform": "instagram",
-                "post_id": p["id"],
-                "media_type": p.get("media_type"),
-                "caption": p.get("caption"),
-                "permalink": p.get("permalink"),
-                "media_url": p.get("media_url"),
-                "thumbnail_url": p.get("thumbnail_url"),
-                "posted_at": p.get("timestamp"),
-                "like_count": int(p.get("like_count") or 0),
-                "comments_count": int(p.get("comments_count") or 0),
-                "insights": p.get("insights", {}),
-                "synced_at": end_dt.isoformat(),
-            }
-            for p in all_posts
-        ]
+        # 2. Instagram account-level insights (reach, impressions, profile views)
         try:
-            sb.table("social_posts").upsert(
-                post_rows,
-                on_conflict="concept_id,platform,post_id",
-            ).execute()
-            print(f"[meta_organic] upserted {len(post_rows)} posts into social_posts", flush=True)
-        except Exception as e:
-            print(f"[meta_organic] social_posts upsert failed: {e}", flush=True)
+            insights_resp = _get(f"{GRAPH_BASE}/{instagram_account_id}/insights", {
+                "access_token": access_token,
+                "metric": "impressions,reach,profile_views",
+                "period": "day",
+                "since": start_dt.isoformat(),
+                "until": end_dt.isoformat(),
+            })
+            for metric in insights_resp.get("data", []):
+                vals = metric.get("values") or []
+                ig_insights[metric["name"]] = {
+                    "total": sum(v.get("value", 0) for v in vals),
+                    "daily": [{"date": v.get("end_time", "")[:10], "value": v.get("value", 0)} for v in vals],
+                }
+        except Exception:  # noqa: BLE001
+            pass
+
+        # 3. Recent media (posts + reels) — fetch up to 50 for DB archiving
+        media_resp = _get(f"{GRAPH_BASE}/{instagram_account_id}/media", {
+            "access_token": access_token,
+            "fields": "id,caption,media_type,timestamp,like_count,comments_count,media_url,thumbnail_url,permalink",
+            "limit": "50",
+        })
+        raw_posts = media_resp.get("data", [])
+
+        # Enrich all posts with per-post insights (stored in DB regardless of date range)
+        for p in raw_posts:
+            if p.get("media_type") == "CAROUSEL_ALBUM" and not p.get("media_url"):
+                p = {**p, **_carousel_cover(p["id"], access_token)}
+            insights = _post_insights(p["id"], access_token, p.get("media_type", "IMAGE"))
+            all_posts.append({**p, "insights": insights})
+
+        # Filter to date range for dashboard stats
+        posts = [
+            p for p in all_posts
+            if p.get("timestamp", "")[:10] >= start_dt.isoformat()
+        ]
+
+        # 3b. Upsert individual posts into social_posts for AI system knowledge
+        if all_posts:
+            post_rows = [
+                {
+                    "concept_id": concept_id,
+                    "platform": "instagram",
+                    "post_id": p["id"],
+                    "media_type": p.get("media_type"),
+                    "caption": p.get("caption"),
+                    "permalink": p.get("permalink"),
+                    "media_url": p.get("media_url"),
+                    "thumbnail_url": p.get("thumbnail_url"),
+                    "posted_at": p.get("timestamp"),
+                    "like_count": int(p.get("like_count") or 0),
+                    "comments_count": int(p.get("comments_count") or 0),
+                    "insights": p.get("insights", {}),
+                    "synced_at": end_dt.isoformat(),
+                }
+                for p in all_posts
+            ]
+            try:
+                sb.table("social_posts").upsert(
+                    post_rows,
+                    on_conflict="concept_id,platform,post_id",
+                ).execute()
+                print(f"[meta_organic] upserted {len(post_rows)} posts into social_posts", flush=True)
+            except Exception as e:
+                print(f"[meta_organic] social_posts upsert failed: {e}", flush=True)
 
     # ------------------------------------------------------------------
     # 4. Facebook Page metrics (optional)

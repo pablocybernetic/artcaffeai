@@ -156,13 +156,16 @@ def sync_meta_organic_endpoint(req: AdsSyncRequest):
     creds = _get_creds("meta", concept_id=req.concept_id)
     access_token = creds.get("access_token")
     # ig_user_id is the Instagram Business Account ID (stored by publishing_routes save_credentials)
-    instagram_account_id = creds.get("ig_user_id") or creds.get("instagram_account_id")
+    instagram_account_id = creds.get("ig_user_id") or creds.get("instagram_account_id") or ""
     page_id = creds.get("page_id") or ""
 
     if not access_token:
         raise HTTPException(status_code=400, detail="Meta access_token not configured — add it in Settings → Social publishing")
-    if not instagram_account_id:
-        raise HTTPException(status_code=400, detail="Instagram Account ID not configured — add it in Settings → Social publishing → Instagram & Facebook")
+    if not instagram_account_id and not page_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Neither an Instagram Account ID nor a Facebook Page ID is configured — add at least one in Settings → Social publishing → Instagram & Facebook",
+        )
 
     try:
         summary = sync_meta_organic(
