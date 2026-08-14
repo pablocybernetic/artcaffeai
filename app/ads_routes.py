@@ -221,7 +221,7 @@ def get_post_comments_endpoint(post_id: str, platform: str, concept_id: str):
         if platform == "facebook":
             resp = _get(f"{GRAPH_BASE}/{post_id}/comments", {
                 "access_token": token,
-                "fields": "message,from,created_time",
+                "fields": "message,from,created_time,comments{message,from,created_time}",
             })
             comments = [
                 {
@@ -229,13 +229,22 @@ def get_post_comments_endpoint(post_id: str, platform: str, concept_id: str):
                     "text": c.get("message"),
                     "author": (c.get("from") or {}).get("name"),
                     "timestamp": c.get("created_time"),
+                    "replies": [
+                        {
+                            "id": r.get("id"),
+                            "text": r.get("message"),
+                            "author": (r.get("from") or {}).get("name"),
+                            "timestamp": r.get("created_time"),
+                        }
+                        for r in (c.get("comments") or {}).get("data", [])
+                    ],
                 }
                 for c in resp.get("data", [])
             ]
         else:
             resp = _get(f"{GRAPH_BASE}/{post_id}/comments", {
                 "access_token": token,
-                "fields": "text,username,timestamp",
+                "fields": "text,username,timestamp,replies{text,username,timestamp}",
             })
             comments = [
                 {
@@ -243,6 +252,15 @@ def get_post_comments_endpoint(post_id: str, platform: str, concept_id: str):
                     "text": c.get("text"),
                     "author": c.get("username"),
                     "timestamp": c.get("timestamp"),
+                    "replies": [
+                        {
+                            "id": r.get("id"),
+                            "text": r.get("text"),
+                            "author": r.get("username"),
+                            "timestamp": r.get("timestamp"),
+                        }
+                        for r in (c.get("replies") or {}).get("data", [])
+                    ],
                 }
                 for c in resp.get("data", [])
             ]
