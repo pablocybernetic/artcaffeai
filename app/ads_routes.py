@@ -216,22 +216,8 @@ def get_post_comments_endpoint(post_id: str, platform: str, concept_id: str):
         raise HTTPException(status_code=400, detail="Meta access_token not configured")
 
     try:
-        token = access_token
+        token = _resolve_meta_token(access_token, platform, creds.get("page_id") or "")
         if platform == "facebook":
-            # Facebook (not Instagram) requires a page-scoped token to read comments.
-            page_id = creds.get("page_id") or ""
-            if page_id:
-                try:
-                    accounts_resp = _get(f"{GRAPH_BASE}/me/accounts", {
-                        "access_token": access_token,
-                        "fields": "id,access_token",
-                    })
-                    for acct in accounts_resp.get("data", []):
-                        if str(acct.get("id")) == str(page_id):
-                            token = acct["access_token"]
-                            break
-                except Exception:  # noqa: BLE001
-                    pass
             resp = _get(f"{GRAPH_BASE}/{post_id}/comments", {
                 "access_token": token,
                 "fields": "message,from,created_time",
@@ -264,3 +250,64 @@ def get_post_comments_endpoint(post_id: str, platform: str, concept_id: str):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch comments: {e}")
+
+
+def _resolve_meta_token(access_token: str, platform: str, page_id: str) -> str:
+    """Facebook writes/reads need a page-scoped token; Instagram works with
+    the plain user token."""
+    if platform != "facebook" or not page_id:
+        return access_token
+    from connectors.meta_organic_connector import GRAPH_BASE, _get  # noqa: PLC0415
+
+    try:
+        accounts_resp = _get(f"{GRAPH_BASE}/me/accounts", {
+            "access_token": access_token,
+            "fields": "id,access_token",
+        })
+        for acct in accounts_resp.get("data", []):
+            if str(acct.get("id")) == str(page_id):
+                return acct["access_token"]
+    except Exception:  # noqa: BLE001
+        pass
+    return access_token
+
+
+class CommentReplyRequest(BaseModel):
+    comment_id: str
+    platform: str
+    concept_id: str
+    message: str
+
+
+@router.post("/meta/organic/comments/reply")
+def reply_to_comment_endpoint(req: CommentReplyRequest):
+    """Post a real, public reply to a comment on Instagram or Facebook."""
+    import httpx  # noqa: PLC0415
+    from connectors.meta_organic_connector import GRAPH_BASE  # noqa: PLC0415
+
+    if not req.message.strip():
+        raise HTTPException(status_code=400, detail="Reply message can't be empty")
+
+    creds = _get_creds("meta", concept_id=req.concept_id)
+    access_token = creds.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Meta access_token not configured")
+
+    token = _resolve_meta_token(access_token, req.platform, creds.get("page_id") or "")
+    # Instagram replies live on their own /replies edge; Facebook replies
+    # are posted as a normal comment nested under the parent comment.
+    url = (
+        f"{GRAPH_BASE}/{req.comment_id}/replies"
+        if req.platform != "facebook"
+        else f"{GRAPH_BASE}/{req.comment_id}/comments"
+    )
+
+    try:
+        resp = httpx.post(url, data={"access_token": token, "message": req.message}, timeout=30.0)
+        if not resp.is_success:
+            raise RuntimeError(f"Meta Graph API {resp.status_code}: {resp.text[:400]}")
+        return {"ok": True, "reply": resp.json()}
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to post reply: {e}")
