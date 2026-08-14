@@ -22,6 +22,7 @@ from supabase import Client, create_client
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 API_KEY = os.environ.get("FASTAPI_API_KEY")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
 sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
@@ -311,3 +312,58 @@ def reply_to_comment_endpoint(req: CommentReplyRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to post reply: {e}")
+
+
+class SuggestReplyRequest(BaseModel):
+    comment_text: str
+    comment_author: str = ""
+    post_caption: str = ""
+
+
+SUGGEST_REPLY_SYSTEM_PROMPT = (
+    "You are replying, as Artcaffe — a premium café brand in Nairobi, Kenya — to a "
+    "customer comment on one of our social media posts. Write ONE short, warm, "
+    "on-brand reply (1-2 sentences). Sound like a real person from the brand, not "
+    "corporate or generic. Use at most one emoji, and only if it fits naturally. "
+    "No hashtags. If the comment is a complaint or negative, be sincere and "
+    "helpful rather than dismissive — invite them to reach out directly for "
+    "anything that needs follow-up (e.g. a specific branch issue). "
+    "Output ONLY the reply text — no quotes, no preamble, nothing else."
+)
+
+
+@router.post("/meta/organic/comments/suggest-reply")
+def suggest_comment_reply_endpoint(req: SuggestReplyRequest):
+    """Draft a suggested reply to a comment with Claude — the user can edit
+    it before sending, nothing is posted from this endpoint."""
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not configured")
+    if not req.comment_text.strip():
+        raise HTTPException(status_code=400, detail="No comment text to reply to")
+
+    import anthropic  # noqa: PLC0415
+
+    user_parts = []
+    if req.post_caption:
+        user_parts.append(f"POST CAPTION:\n{req.post_caption}")
+    author = req.comment_author or "a customer"
+    user_parts.append(f"COMMENT (from {author}):\n{req.comment_text}")
+    user_parts.append("Write a reply.")
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=20.0)
+    try:
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            system=SUGGEST_REPLY_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": "\n\n".join(user_parts)}],
+        )
+        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+        text = text.strip('"').strip()
+        return {"ok": True, "reply": text}
+    except anthropic.APIStatusError as e:
+        msg = str(getattr(e, "message", "") or e)
+        detail = "Anthropic API credit balance is too low." if "credit balance" in msg.lower() else f"Claude API error: {msg[:300]}"
+        raise HTTPException(status_code=400, detail=detail)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate reply: {e}")
