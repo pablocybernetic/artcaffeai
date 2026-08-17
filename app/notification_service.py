@@ -194,43 +194,44 @@ def notify_team(
     return sent
 
 
-def notify_approval_needed_to_team(
+def _eligible_team_members(sb: Client, *, notif_type: str, role_slugs: list[str]) -> list[dict]:
+    """Active team members in the given roles who haven't opted out of this
+    notification type. notification_preferences is opt-out — a member with
+    no row for this type (or the column unset entirely) still gets notified,
+    so existing users keep their current behavior until they explicitly
+    turn something off."""
+    role_ids_res = sb.table("roles").select("id").in_("slug", role_slugs).execute()
+    role_ids = [r["id"] for r in (role_ids_res.data or [])]
+    if not role_ids:
+        return []
+
+    members_res = (
+        sb.table("team_members")
+        .select("id,email,full_name,notification_preferences")
+        .in_("role_id", role_ids)
+        .eq("is_active", True)
+        .execute()
+    )
+    members = members_res.data or []
+    return [m for m in members if (m.get("notification_preferences") or {}).get(notif_type, True)]
+
+
+def _notify_relevant_team(
     sb: Client,
     *,
-    brief_id: Optional[str],
-    title: str,
+    notif_type: str,
+    subject: str,
+    html: str,
+    role_slugs: list[str] = ["admin", "content_manager"],  # noqa: B006
+    brief_id: Optional[str] = None,
+    content_item_id: Optional[str] = None,
+    payload: Optional[dict] = None,
 ) -> int:
-    """
-    Notify every active admin and content_manager that a content item
-    has moved to pending_review and needs their approval.
-
-    Writes one notifications row per recipient and sends emails.
-    Returns the number of emails successfully delivered.
-    """
-    role_ids_res = sb.table("roles").select("id").in_("slug", ["admin", "content_manager"]).execute()
-    role_ids = [r["id"] for r in (role_ids_res.data or [])]
-
-    members: list[dict] = []
-    if role_ids:
-        members_res = (
-            sb.table("team_members")
-            .select("id,email,full_name")
-            .in_("role_id", role_ids)
-            .eq("is_active", True)
-            .execute()
-        )
-        members = members_res.data or []
-
+    """Fan out one notification to every eligible team member, respecting
+    each recipient's notification_preferences. Returns emails sent."""
+    members = _eligible_team_members(sb, notif_type=notif_type, role_slugs=role_slugs)
     sent = 0
     for m in members:
-        subject = f"Artcaffe — Approval needed: {title}"
-        html = (
-            f"<p>Hi {m['full_name']},</p>"
-            f"<p>The content item <strong>{title}</strong> is awaiting your approval.</p>"
-            f"<p><a href='{DASHBOARD_URL}/briefs' style='background:#1a1a1a;color:#fff;"
-            f"padding:8px 16px;border-radius:6px;text-decoration:none;'>Review in dashboard</a></p>"
-            f"<p>— Artcaffe AI</p>"
-        )
         ok = notify_team(
             sb,
             recipient_id=m["id"],
@@ -239,28 +240,57 @@ def notify_approval_needed_to_team(
             subject=subject,
             html=html,
             brief_id=brief_id,
-            type="approval_needed",
-            payload={"brief_id": brief_id, "title": title},
+            content_item_id=content_item_id,
+            type=notif_type,
+            payload=payload,
         )
         if ok:
             sent += 1
-
     print(
-        f"[notification_service] approval_needed fired. brief={brief_id} "
-        f"recipients={len(members)} emails_sent={sent}",
+        f"[notification_service] {notif_type} fired. recipients={len(members)} emails_sent={sent}",
         flush=True,
     )
     return sent
+
+
+def notify_approval_needed_to_team(
+    sb: Client,
+    *,
+    brief_id: Optional[str],
+    title: str,
+) -> int:
+    """
+    Notify every active admin and content_manager (who hasn't opted out)
+    that a content item has moved to pending_review and needs their
+    approval. Writes one notifications row per recipient and sends emails.
+    Returns the number of emails successfully delivered.
+    """
+    subject = f"Artcaffe — Approval needed: {title}"
+    html = (
+        f"<p>Hi there,</p>"
+        f"<p>The content item <strong>{title}</strong> is awaiting your approval.</p>"
+        f"<p><a href='{DASHBOARD_URL}/briefs' style='background:#1a1a1a;color:#fff;"
+        f"padding:8px 16px;border-radius:6px;text-decoration:none;'>Review in dashboard</a></p>"
+        f"<p>— Artcaffe AI</p>"
+    )
+    return _notify_relevant_team(
+        sb,
+        notif_type="approval_needed",
+        subject=subject,
+        html=html,
+        brief_id=brief_id,
+        payload={"brief_id": brief_id, "title": title},
+    )
 
 
 # ---------------------------------------------------------------------------
 # Convenience helpers (backward-compatible)
 # ---------------------------------------------------------------------------
 
-def notify_ideation_complete(sb: Client, brief_id: str, n_ideas: int) -> bool:
-    return send_notification(
+def notify_ideation_complete(sb: Client, brief_id: str, n_ideas: int) -> int:
+    return _notify_relevant_team(
         sb,
-        type="ideation_complete",
+        notif_type="ideation_complete",
         subject=f"Artcaffe AI — {n_ideas} new content ideas ready for review",
         html=(
             f"<p>Hello,</p>"
@@ -269,14 +299,15 @@ def notify_ideation_complete(sb: Client, brief_id: str, n_ideas: int) -> bool:
             f"<p><a href='{DASHBOARD_URL}/briefs'>Review in dashboard</a></p>"
             f"<p>— Artcaffe AI</p>"
         ),
+        brief_id=brief_id,
         payload={"brief_id": brief_id, "n_ideas": n_ideas},
     )
 
 
-def notify_production_complete(sb: Client, brief_id: str) -> bool:
-    return send_notification(
+def notify_production_complete(sb: Client, brief_id: str) -> int:
+    return _notify_relevant_team(
         sb,
-        type="production_complete",
+        notif_type="production_complete",
         subject="Artcaffe AI — Final production copy is ready",
         html=(
             f"<p>Hello,</p>"
@@ -285,6 +316,7 @@ def notify_production_complete(sb: Client, brief_id: str) -> bool:
             f"<p><a href='{DASHBOARD_URL}/briefs'>Review in dashboard</a></p>"
             f"<p>— Artcaffe AI</p>"
         ),
+        brief_id=brief_id,
         payload={"brief_id": brief_id},
     )
 
@@ -332,7 +364,7 @@ def notify_post_scheduled(
     platform_types: Optional[dict] = None,
     brief_id: Optional[str] = None,
     content_item_id: Optional[str] = None,
-) -> bool:
+) -> int:
     """Email confirmation when a post is scheduled for future publishing."""
     pt = platform_types or {}
     platform_lines = "".join(
@@ -373,11 +405,13 @@ def notify_post_scheduled(
   </div>
 </div>
 """
-    return send_notification(
+    return _notify_relevant_team(
         sb,
-        type="post_scheduled",
+        notif_type="post_scheduled",
         subject=f'Artcaffe — Scheduled: "{title}"',
         html=html,
+        brief_id=brief_id,
+        content_item_id=content_item_id,
         payload={
             "title": title,
             "platforms": platforms,
@@ -396,7 +430,7 @@ def notify_post_published(
     platform_types: Optional[dict] = None,
     brief_id: Optional[str] = None,
     content_item_id: Optional[str] = None,
-) -> bool:
+) -> int:
     """Email confirmation when a post is successfully published to one or more platforms."""
     pt = platform_types or {}
     rows = ""
@@ -457,11 +491,13 @@ def notify_post_published(
   </div>
 </div>
 """
-    return send_notification(
+    return _notify_relevant_team(
         sb,
-        type="post_published",
+        notif_type="post_published",
         subject=subject,
         html=html,
+        brief_id=brief_id,
+        content_item_id=content_item_id,
         payload={
             "title": title,
             "results": {p: {"ok": r.get("ok"), "post_url": r.get("post_url")} for p, r in results.items()},
