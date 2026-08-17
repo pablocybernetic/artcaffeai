@@ -61,6 +61,7 @@ from budget_routes import router as budget_router
 from ads_routes import router as ads_router
 from brand_assets_routes import router as brand_assets_router
 import master_scheduler
+import reminder_scheduler
 
 # ---------------------------------------------------------------------------
 # Config
@@ -77,7 +78,9 @@ sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await master_scheduler.start(sb)
+    await reminder_scheduler.start(sb)
     yield
+    await reminder_scheduler.stop()
     await master_scheduler.stop()
 
 

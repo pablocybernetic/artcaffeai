@@ -81,6 +81,7 @@ def _write_team_notification(
     content_item_id: Optional[str] = None,
     job_id: Optional[str] = None,
     channel: str = "email",
+    notif_type: str = "notification",
 ) -> str:
     """Insert one row into the notifications table. Returns id."""
     row: dict[str, Any] = {
@@ -88,6 +89,7 @@ def _write_team_notification(
         "channel":      channel,
         "subject":      subject,
         "body":         body,
+        "type":         notif_type,
         "created_at":   _now(),
     }
     if brief_id:
@@ -177,6 +179,7 @@ def notify_team(
         brief_id=brief_id,
         content_item_id=content_item_id,
         job_id=job_id,
+        notif_type=type,
     )
 
     # 2. System audit log
