@@ -59,6 +59,61 @@ def get_state() -> dict:
     return dict(_state)
 
 
+def set_enabled(enabled: bool) -> None:
+    _state["enabled"] = bool(enabled)
+    _persist()
+    print(f"[meta_sync_scheduler] enabled → {_state['enabled']}", flush=True)
+
+
+def set_window(start_hour_eat: int, end_hour_eat: int) -> None:
+    _state["start_hour_eat"] = max(0, min(23, int(start_hour_eat)))
+    _state["end_hour_eat"] = max(0, min(23, int(end_hour_eat)))
+    _persist()
+    print(
+        f"[meta_sync_scheduler] window updated → "
+        f"{_state['start_hour_eat']}:00-{_state['end_hour_eat']}:00 EAT",
+        flush=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Persistence (survives restarts/redeploys — env vars only seed the very
+# first default on a brand-new deploy)
+# ---------------------------------------------------------------------------
+
+_SETTINGS_KEY = "meta_sync_scheduler"
+
+
+def _persist() -> None:
+    if _sb is None:
+        return
+    from app_settings import set_setting  # noqa: PLC0415
+    set_setting(_sb, _SETTINGS_KEY, {
+        "enabled": _state["enabled"],
+        "start_hour_eat": _state["start_hour_eat"],
+        "end_hour_eat": _state["end_hour_eat"],
+    })
+
+
+def _load_persisted() -> None:
+    if _sb is None:
+        return
+    from app_settings import get_setting  # noqa: PLC0415
+    try:
+        saved = get_setting(_sb, _SETTINGS_KEY, None)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[meta_sync_scheduler] failed to load persisted settings: {exc}", flush=True)
+        return
+    if not saved:
+        return
+    if "enabled" in saved:
+        _state["enabled"] = bool(saved["enabled"])
+    if "start_hour_eat" in saved:
+        _state["start_hour_eat"] = int(saved["start_hour_eat"])
+    if "end_hour_eat" in saved:
+        _state["end_hour_eat"] = int(saved["end_hour_eat"])
+
+
 # ---------------------------------------------------------------------------
 # Internal
 # ---------------------------------------------------------------------------
@@ -175,6 +230,7 @@ async def _scheduler_loop() -> None:
 async def start(sb: Client) -> None:
     global _task, _sb
     _sb = sb
+    _load_persisted()
     if _task and not _task.done():
         print("[meta_sync_scheduler] already running", flush=True)
         return

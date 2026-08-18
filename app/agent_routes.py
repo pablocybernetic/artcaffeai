@@ -510,6 +510,56 @@ def update_scheduler(body: SchedulerUpdate):
     return {"ok": True, "data": get_state()}
 
 
+@router.get("/meta-sync/scheduler")
+def get_meta_sync_scheduler_status():
+    """Return current Meta sync scheduler state (window, enabled, next/last run)."""
+    from meta_sync_scheduler import get_state  # noqa: PLC0415
+    return {"ok": True, "data": get_state()}
+
+
+class MetaSyncSchedulerUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    start_hour_eat: Optional[int] = None
+    end_hour_eat: Optional[int] = None
+
+
+@router.post("/meta-sync/scheduler")
+def update_meta_sync_scheduler(body: MetaSyncSchedulerUpdate):
+    """Update the enabled flag and/or Kenyan-time sync window for the Meta sync scheduler."""
+    from meta_sync_scheduler import set_enabled, set_window, get_state  # noqa: PLC0415
+    if body.enabled is not None:
+        set_enabled(body.enabled)
+    if body.start_hour_eat is not None or body.end_hour_eat is not None:
+        state = get_state()
+        start_h = body.start_hour_eat if body.start_hour_eat is not None else state["start_hour_eat"]
+        end_h = body.end_hour_eat if body.end_hour_eat is not None else state["end_hour_eat"]
+        set_window(start_h, end_h)
+    return {"ok": True, "data": get_state()}
+
+
+@router.get("/reminder/scheduler")
+def get_reminder_scheduler_status():
+    """Return current post-reminder scheduler state (interval, enabled, next/last run)."""
+    from reminder_scheduler import get_state  # noqa: PLC0415
+    return {"ok": True, "data": get_state()}
+
+
+class ReminderSchedulerUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    interval_minutes: Optional[int] = None
+
+
+@router.post("/reminder/scheduler")
+def update_reminder_scheduler(body: ReminderSchedulerUpdate):
+    """Update the poll interval and/or enabled flag for the post-reminder scheduler."""
+    from reminder_scheduler import set_enabled, set_interval, get_state  # noqa: PLC0415
+    if body.interval_minutes is not None:
+        set_interval(body.interval_minutes)
+    if body.enabled is not None:
+        set_enabled(body.enabled)
+    return {"ok": True, "data": get_state()}
+
+
 @router.get("/master/status")
 def get_master_status():
     """

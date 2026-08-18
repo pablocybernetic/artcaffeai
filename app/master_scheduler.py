@@ -46,12 +46,49 @@ def get_state() -> dict:
 def set_interval(minutes: int) -> None:
     """Change the cron interval. Minimum 5 min. Takes effect after the current sleep."""
     _state["interval_minutes"] = max(5, int(minutes))
+    _persist()
     print(f"[master_scheduler] interval updated → {_state['interval_minutes']} min", flush=True)
 
 
 def set_enabled(enabled: bool) -> None:
     _state["enabled"] = bool(enabled)
+    _persist()
     print(f"[master_scheduler] enabled → {_state['enabled']}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Persistence (survives restarts/redeploys — env vars only seed the very
+# first default on a brand-new deploy)
+# ---------------------------------------------------------------------------
+
+_SETTINGS_KEY = "master_scheduler"
+
+
+def _persist() -> None:
+    if _sb is None:
+        return
+    from app_settings import set_setting  # noqa: PLC0415
+    set_setting(_sb, _SETTINGS_KEY, {
+        "enabled": _state["enabled"],
+        "interval_minutes": _state["interval_minutes"],
+    })
+
+
+def _load_persisted() -> None:
+    if _sb is None:
+        return
+    from app_settings import get_setting  # noqa: PLC0415
+    try:
+        saved = get_setting(_sb, _SETTINGS_KEY, None)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[master_scheduler] failed to load persisted settings: {exc}", flush=True)
+        return
+    if not saved:
+        return
+    if "enabled" in saved:
+        _state["enabled"] = bool(saved["enabled"])
+    if "interval_minutes" in saved:
+        _state["interval_minutes"] = max(5, int(saved["interval_minutes"]))
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +167,7 @@ async def _scheduler_loop() -> None:
 async def start(sb) -> None:
     global _task, _sb
     _sb = sb
+    _load_persisted()
     if _task and not _task.done():
         print("[master_scheduler] already running", flush=True)
         return
