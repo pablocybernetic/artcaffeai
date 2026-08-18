@@ -140,6 +140,13 @@ async def _scheduler_loop() -> None:
             print(f"[meta_sync_scheduler] skipping — hour={current_hour} EAT outside window", flush=True)
             continue
 
+        from scheduler_lock import try_claim_run  # noqa: PLC0415
+        loop = asyncio.get_event_loop()
+        claimed = await loop.run_in_executor(None, try_claim_run, _sb, "meta_sync_scheduler", 45 * 60)
+        if not claimed:
+            print("[meta_sync_scheduler] skipping — another worker already claimed this run", flush=True)
+            continue
+
         _state["run_count"] += 1
         run_num = _state["run_count"]
         _state["last_run_at"] = _now_eat().isoformat()

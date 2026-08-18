@@ -231,6 +231,12 @@ async def _scheduler_loop() -> None:
         if not _state["enabled"]:
             continue
 
+        from scheduler_lock import try_claim_run  # noqa: PLC0415
+        loop = asyncio.get_event_loop()
+        claimed = await loop.run_in_executor(None, try_claim_run, _sb, "reminder_scheduler", interval * 60 - 5)
+        if not claimed:
+            continue
+
         _state["run_count"] += 1
         run_num = _state["run_count"]
         _state["last_run_at"] = _now().isoformat()
@@ -238,7 +244,6 @@ async def _scheduler_loop() -> None:
         _state["last_error"] = None
 
         try:
-            loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, _run_once_sync, _sb)
             _state["last_reminders_sent"] = result.get("sent", 0)
             if result.get("sent"):

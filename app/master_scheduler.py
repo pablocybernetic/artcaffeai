@@ -92,6 +92,13 @@ async def _scheduler_loop() -> None:
             print("[master_scheduler] skipping — disabled", flush=True)
             continue
 
+        from scheduler_lock import try_claim_run  # noqa: PLC0415
+        loop = asyncio.get_event_loop()
+        claimed = await loop.run_in_executor(None, try_claim_run, _sb, "master_scheduler", interval * 60 - 5)
+        if not claimed:
+            print("[master_scheduler] skipping — another worker already claimed this run", flush=True)
+            continue
+
         _state["run_count"] += 1
         run_num = _state["run_count"]
         _state["last_run_at"] = _now_iso()
