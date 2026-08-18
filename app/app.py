@@ -62,6 +62,7 @@ from ads_routes import router as ads_router
 from brand_assets_routes import router as brand_assets_router
 import master_scheduler
 import reminder_scheduler
+import meta_sync_scheduler
 
 # ---------------------------------------------------------------------------
 # Config
@@ -79,7 +80,9 @@ sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 async def lifespan(app: FastAPI):
     await master_scheduler.start(sb)
     await reminder_scheduler.start(sb)
+    await meta_sync_scheduler.start(sb)
     yield
+    await meta_sync_scheduler.stop()
     await reminder_scheduler.stop()
     await master_scheduler.stop()
 
