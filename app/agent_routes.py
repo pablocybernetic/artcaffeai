@@ -560,6 +560,29 @@ def update_reminder_scheduler(body: ReminderSchedulerUpdate):
     return {"ok": True, "data": get_state()}
 
 
+@router.get("/data-snapshot/scheduler")
+def get_data_snapshot_scheduler_status():
+    """Return current data-snapshot (GA4 + paid ads) scheduler state."""
+    from data_snapshot_scheduler import get_state  # noqa: PLC0415
+    return {"ok": True, "data": get_state()}
+
+
+class DataSnapshotSchedulerUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    run_hour_eat: Optional[int] = None
+
+
+@router.post("/data-snapshot/scheduler")
+def update_data_snapshot_scheduler(body: DataSnapshotSchedulerUpdate):
+    """Update the daily run hour and/or enabled flag for the data-snapshot scheduler."""
+    from data_snapshot_scheduler import set_enabled, set_run_hour, get_state  # noqa: PLC0415
+    if body.run_hour_eat is not None:
+        set_run_hour(body.run_hour_eat)
+    if body.enabled is not None:
+        set_enabled(body.enabled)
+    return {"ok": True, "data": get_state()}
+
+
 @router.get("/master/status")
 def get_master_status():
     """
