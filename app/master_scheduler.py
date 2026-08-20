@@ -40,6 +40,12 @@ _sb = None  # Supabase client injected by start()
 # ---------------------------------------------------------------------------
 
 def get_state() -> dict:
+    # uvicorn runs multiple worker processes, each with its own in-memory
+    # _state — a change made via a request handled by worker A never
+    # updates worker B's copy on its own. Re-reading app_settings here
+    # means a GET always reflects the true persisted value, whichever
+    # worker answers it.
+    _load_persisted()
     return dict(_state)
 
 
@@ -124,6 +130,11 @@ async def _scheduler_loop() -> None:
         ).isoformat()
 
         await asyncio.sleep(interval * 60)
+
+        # Pick up settings changes made via a request another worker handled
+        # (each uvicorn worker has its own in-memory _state).
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _load_persisted)
 
         if not _state["enabled"]:
             print("[master_scheduler] skipping — disabled", flush=True)
