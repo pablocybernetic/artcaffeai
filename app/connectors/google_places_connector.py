@@ -65,6 +65,35 @@ def fetch_place_details(place_id: str, api_key: str) -> dict:
     return _get(f"{PLACES_BASE}/places/{place_id}", api_key=api_key)
 
 
+def find_place_id(text_query: str, api_key: str, *, lat: Optional[float] = None,
+                   lng: Optional[float] = None, timeout: float = 15.0) -> Optional[str]:
+    """Resolves a free-text query (name + address) to a Google Place ID via
+    Text Search (New) — used to backfill place_id for locations we only
+    know by name/address/coordinates (e.g. imported from a third-party
+    store locator that exposes a Google CID, not a place_id). Returns the
+    first result's id, or None if nothing matched. Raises RuntimeError on
+    a non-2xx response."""
+    body: dict[str, Any] = {"textQuery": text_query, "maxResultCount": 1}
+    if lat is not None and lng is not None:
+        body["locationBias"] = {
+            "circle": {"center": {"latitude": lat, "longitude": lng}, "radius": 500.0}
+        }
+    resp = httpx.post(
+        f"{PLACES_BASE}/places:searchText",
+        json=body,
+        headers={
+            "X-Goog-Api-Key": api_key,
+            "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress",
+            "Content-Type": "application/json",
+        },
+        timeout=timeout,
+    )
+    if not resp.is_success:
+        raise RuntimeError(f"Google Places Text Search {resp.status_code}: {resp.text[:400]}")
+    places = resp.json().get("places") or []
+    return places[0]["id"] if places else None
+
+
 def resolve_photo_uris(photo_names: list[str], api_key: str, limit: int = 5) -> list[dict]:
     """Resolves each Google photo reference to a keyless googleusercontent
     CDN URL via the Photo Media endpoint, at sync time — never construct a
