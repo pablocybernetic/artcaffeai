@@ -60,10 +60,13 @@ from font_routes import router as font_router
 from budget_routes import router as budget_router
 from ads_routes import router as ads_router
 from brand_assets_routes import router as brand_assets_router
+from locations_routes import router as locations_router, internal_router as locations_internal_router
+from locations_public_routes import router as locations_public_router
 import master_scheduler
 import reminder_scheduler
 import meta_sync_scheduler
 import data_snapshot_scheduler
+import locations_scheduler
 
 # ---------------------------------------------------------------------------
 # Config
@@ -83,7 +86,9 @@ async def lifespan(app: FastAPI):
     await reminder_scheduler.start(sb)
     await meta_sync_scheduler.start(sb)
     await data_snapshot_scheduler.start(sb)
+    await locations_scheduler.start(sb)
     yield
+    await locations_scheduler.stop()
     await data_snapshot_scheduler.stop()
     await meta_sync_scheduler.stop()
     await reminder_scheduler.stop()
@@ -107,6 +112,9 @@ app.include_router(font_router)
 app.include_router(budget_router)
 app.include_router(ads_router)
 app.include_router(brand_assets_router)
+app.include_router(locations_router)
+app.include_router(locations_internal_router)
+app.include_router(locations_public_router)
 
 
 # ---------------------------------------------------------------------------
