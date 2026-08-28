@@ -209,17 +209,13 @@ def list_locations(
     return {"ok": True, "locations": rows}
 
 
-@router.get("/{location_id}")
-def get_location(location_id: str):
-    res = sb.table("locations").select("*").eq("id", location_id).maybe_single().execute()
-    if not res.data:
-        raise HTTPException(404, "Location not found")
-    return {"ok": True, "location": res.data}
-
-
 @router.post("")
 def create_location(body: LocationIn):
-    row = body.dict()
+    # exclude_none, not a plain .dict() — Postgres only applies a column's
+    # DEFAULT when it's omitted from the INSERT entirely; an explicit null
+    # (which a plain .dict() sends for every unset Optional field) violates
+    # the NOT NULL DEFAULT '[]'::jsonb columns (secondary_categories, etc).
+    row = body.dict(exclude_none=True)
     if not row.get("slug"):
         row["slug"] = _slugify(row["name"])
     row["created_at"] = _now()
@@ -231,19 +227,12 @@ def create_location(body: LocationIn):
     return {"ok": True, "location": (res.data or [None])[0]}
 
 
-@router.patch("/{location_id}")
-def update_location(location_id: str, body: LocationUpdate):
-    update = body.dict(exclude_unset=True)
-    if not update:
-        raise HTTPException(400, "No fields to update")
-    update["updated_at"] = _now()
-    try:
-        res = sb.table("locations").update(update).eq("id", location_id).execute()
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(400, f"Could not update location: {exc}") from exc
-    if not res.data:
-        raise HTTPException(404, "Location not found")
-    return {"ok": True, "location": res.data[0]}
+# NOTE: GET/PATCH /{location_id} are registered near the bottom of this
+# file, after every literal single-segment path (/settings, /sync-all)
+# — FastAPI/Starlette match routes in registration order, so a
+# {location_id} route registered first would greedily swallow
+# GET /locations/settings as location_id="settings" and 500 when that
+# fails as a UUID lookup.
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +253,9 @@ def _places_api_key() -> str:
 @router.post("/{location_id}/sync")
 def sync_one_location(location_id: str):
     res = sb.table("locations").select("*").eq("id", location_id).maybe_single().execute()
-    if not res.data:
+    # maybe_single() returns None outright (not a response with .data=None)
+    # on this supabase-py version when zero rows match — guard both.
+    if not res or not res.data:
         raise HTTPException(404, "Location not found")
     api_key = _places_api_key()
     saved = app_settings.get_setting(sb, SETTINGS_KEY, {}) or {}
@@ -423,6 +414,29 @@ def test_connection():
         saved["last_failure_at"] = now
         app_settings.set_setting(sb, SETTINGS_KEY, saved)
         return {"ok": False, "error": error}
+
+
+@router.get("/{location_id}")
+def get_location(location_id: str):
+    res = sb.table("locations").select("*").eq("id", location_id).maybe_single().execute()
+    if not res or not res.data:
+        raise HTTPException(404, "Location not found")
+    return {"ok": True, "location": res.data}
+
+
+@router.patch("/{location_id}")
+def update_location(location_id: str, body: LocationUpdate):
+    update = body.dict(exclude_unset=True)
+    if not update:
+        raise HTTPException(400, "No fields to update")
+    update["updated_at"] = _now()
+    try:
+        res = sb.table("locations").update(update).eq("id", location_id).execute()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"Could not update location: {exc}") from exc
+    if not res.data:
+        raise HTTPException(404, "Location not found")
+    return {"ok": True, "location": res.data[0]}
 
 
 # ---------------------------------------------------------------------------

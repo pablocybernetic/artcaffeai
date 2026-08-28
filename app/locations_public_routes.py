@@ -210,7 +210,9 @@ def nearest_locations(
 def get_location(slug: str, response: Response):
     _set_cache(response)
     res = sb.table("locations").select("*").eq("slug", slug).eq("status", "active").maybe_single().execute()
-    if not res.data:
+    # maybe_single() returns None outright (not a response with .data=None)
+    # on this supabase-py version when zero rows match — guard both.
+    if not res or not res.data:
         raise HTTPException(404, "Location not found")
     row = res.data
 
@@ -245,7 +247,7 @@ def get_location(slug: str, response: Response):
 def get_location_reviews(slug: str, response: Response):
     _set_cache(response)
     res = sb.table("locations").select("name,rating,review_count,google_reviews,last_google_sync_at").eq("slug", slug).eq("status", "active").maybe_single().execute()
-    if not res.data:
+    if not res or not res.data:
         raise HTTPException(404, "Location not found")
     row = res.data
     return {
