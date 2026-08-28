@@ -40,6 +40,7 @@ from .env (never printed).
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 import time
@@ -110,6 +111,7 @@ def _load_env() -> dict:
 
 def main() -> None:
     env = _load_env()
+    os.environ.update(env)  # secrets_crypto reads MARKETINGAI_SETTINGS_ENCRYPTION_KEY at import time
     sb = create_client(env["SUPABASE_URL"], env["SUPABASE_SERVICE_ROLE_KEY"])
 
     from app_settings import get_setting  # noqa: E402
