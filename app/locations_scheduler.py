@@ -57,6 +57,7 @@ _task: Optional[asyncio.Task] = None
 _sb: Optional[Client] = None
 
 SETTINGS_KEY = "locations_google_integration"
+SHOPIFY_SETTINGS_KEY = "locations_shopify_sync"
 
 
 # ---------------------------------------------------------------------------
@@ -154,17 +155,50 @@ def _is_due() -> bool:
     return (_now() - last).total_seconds() >= interval
 
 
+def _get_shopify_credentials() -> Optional[tuple[str, str]]:
+    if _sb is None:
+        return None
+    from app_settings import get_setting  # noqa: PLC0415
+    from secrets_crypto import decrypt_value  # noqa: PLC0415
+    saved = get_setting(_sb, SHOPIFY_SETTINGS_KEY, {}) or {}
+    if not saved.get("enabled"):
+        return None
+    domain = saved.get("store_domain")
+    enc = saved.get("admin_token_enc")
+    if not domain or not enc:
+        return None
+    try:
+        return domain, decrypt_value(enc)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[locations_scheduler] could not decrypt shopify admin_token: {exc}", flush=True)
+        return None
+
+
 def _sync_sync(sb: Client) -> dict:
     from app_settings import get_setting  # noqa: PLC0415
     from google_location_sync_service import sync_all_locations  # noqa: PLC0415
 
     api_key = _get_places_api_key()
     if not api_key:
-        return {"skipped": True, "reason": "Google Places API key not configured"}
+        result = {"skipped": True, "reason": "Google Places API key not configured"}
+    else:
+        saved = get_setting(sb, SETTINGS_KEY, {}) or {}
+        sync_fields = saved.get("sync_fields")
+        result = sync_all_locations(sb, api_key, sync_fields=sync_fields)
 
-    saved = get_setting(sb, SETTINGS_KEY, {}) or {}
-    sync_fields = saved.get("sync_fields")
-    return sync_all_locations(sb, api_key, sync_fields=sync_fields)
+    # Push to Shopify metaobjects after Google sync, regardless of whether
+    # Google sync ran this tick -- a location's MarketingAI-managed fields
+    # (services, shopify_url, etc.) can change independent of Google data.
+    shopify_creds = _get_shopify_credentials()
+    if shopify_creds:
+        from shopify_metaobject_sync import sync_all_to_shopify  # noqa: PLC0415
+        store_domain, admin_token = shopify_creds
+        try:
+            result["shopify_sync"] = sync_all_to_shopify(sb, store_domain, admin_token)
+        except Exception as exc:  # noqa: BLE001
+            result["shopify_sync"] = {"error": str(exc)[:300]}
+
+    return result
 
 
 async def _scheduler_loop() -> None:

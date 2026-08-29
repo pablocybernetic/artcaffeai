@@ -416,6 +416,75 @@ def test_connection():
         return {"ok": False, "error": error}
 
 
+class ShopifySettingsUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    store_domain: Optional[str] = None
+    admin_token: Optional[str] = None
+
+
+@router.get("/settings/shopify")
+def get_shopify_settings():
+    saved = app_settings.get_setting(sb, locations_scheduler.SHOPIFY_SETTINGS_KEY, {}) or {}
+    return {
+        "ok": True,
+        "data": {
+            "enabled": bool(saved.get("enabled")),
+            "store_domain": saved.get("store_domain"),
+            "admin_token_masked": mask_value(_maybe_decrypt(saved.get("admin_token_enc"))),
+            "admin_token_configured": bool(saved.get("admin_token_enc")),
+            "last_sync_at": saved.get("last_sync_at"),
+            "last_sync_result": saved.get("last_sync_result"),
+            "last_sync_error": saved.get("last_sync_error"),
+        },
+    }
+
+
+@router.post("/settings/shopify")
+def update_shopify_settings(body: ShopifySettingsUpdate):
+    saved = app_settings.get_setting(sb, locations_scheduler.SHOPIFY_SETTINGS_KEY, {}) or {}
+    if body.enabled is not None:
+        saved["enabled"] = body.enabled
+    if body.store_domain:
+        saved["store_domain"] = body.store_domain
+    if body.admin_token:
+        saved["admin_token_enc"] = encrypt_value(body.admin_token)
+    app_settings.set_setting(sb, locations_scheduler.SHOPIFY_SETTINGS_KEY, saved)
+    return get_shopify_settings()
+
+
+@router.post("/settings/shopify/remove-credential")
+def remove_shopify_credential():
+    saved = app_settings.get_setting(sb, locations_scheduler.SHOPIFY_SETTINGS_KEY, {}) or {}
+    saved.pop("admin_token_enc", None)
+    app_settings.set_setting(sb, locations_scheduler.SHOPIFY_SETTINGS_KEY, saved)
+    return get_shopify_settings()
+
+
+@router.post("/sync-shopify-now")
+def sync_shopify_now():
+    from shopify_metaobject_sync import sync_all_to_shopify  # noqa: PLC0415
+
+    saved = app_settings.get_setting(sb, locations_scheduler.SHOPIFY_SETTINGS_KEY, {}) or {}
+    store_domain = saved.get("store_domain")
+    admin_token = _maybe_decrypt(saved.get("admin_token_enc"))
+    if not store_domain or not admin_token:
+        raise HTTPException(400, "Shopify store domain / admin token not configured")
+
+    now = _now()
+    try:
+        result = sync_all_to_shopify(sb, store_domain, admin_token)
+        saved["last_sync_at"] = now
+        saved["last_sync_result"] = result
+        saved["last_sync_error"] = None
+    except Exception as exc:  # noqa: BLE001
+        saved["last_sync_at"] = now
+        saved["last_sync_error"] = str(exc)[:300]
+        app_settings.set_setting(sb, locations_scheduler.SHOPIFY_SETTINGS_KEY, saved)
+        raise HTTPException(502, "Shopify sync failed") from exc
+    app_settings.set_setting(sb, locations_scheduler.SHOPIFY_SETTINGS_KEY, saved)
+    return {"ok": True, "data": result}
+
+
 @router.get("/{location_id}")
 def get_location(location_id: str):
     res = sb.table("locations").select("*").eq("id", location_id).maybe_single().execute()
