@@ -103,7 +103,14 @@ def sync_location_to_shopify(store_domain: str, admin_token: str, row: dict) -> 
         _UPSERT_MUTATION,
         {
             "handle": {"type": METAOBJECT_TYPE, "handle": handle},
-            "metaobject": {"fields": _build_fields(row)},
+            "metaobject": {
+                "fields": _build_fields(row),
+                # The definition has the publishable capability enabled (so
+                # Storefront/Liquid access is possible at all) -- entries
+                # default to DRAFT and are invisible to shop.metaobjects.*
+                # until explicitly published.
+                "capabilities": {"publishable": {"status": "ACTIVE"}},
+            },
         },
     )
     errors = result.get("errors")
