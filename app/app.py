@@ -67,6 +67,7 @@ import reminder_scheduler
 import meta_sync_scheduler
 import data_snapshot_scheduler
 import locations_scheduler
+import publish_scheduler
 
 # ---------------------------------------------------------------------------
 # Config
@@ -87,7 +88,9 @@ async def lifespan(app: FastAPI):
     await meta_sync_scheduler.start(sb)
     await data_snapshot_scheduler.start(sb)
     await locations_scheduler.start(sb)
+    await publish_scheduler.start(sb)
     yield
+    await publish_scheduler.stop()
     await locations_scheduler.stop()
     await data_snapshot_scheduler.stop()
     await meta_sync_scheduler.stop()

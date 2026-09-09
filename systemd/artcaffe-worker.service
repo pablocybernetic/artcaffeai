@@ -1,8 +1,16 @@
 [Unit]
-Description=ArtCaffe Brand Pipeline Job Runner (Standalone Poller)
+Description=ArtCaffe Brand Pipeline Job Runner (Standalone Poller) — optional, redundant fallback
 After=network.target
-# Only enable this unit if you want the job runner decoupled from the API.
-# When using FastAPI BackgroundTasks, this service is NOT needed.
+# NOT required for scheduled posts: app/publish_scheduler.py runs in-process
+# inside the API itself (see app.py's lifespan) and is the actual mechanism
+# that fires scheduled_publish jobs — it needs no separate service and is
+# always on whenever the API is. (Earlier wording here claimed this unit was
+# needed for exactly that job type when BackgroundTasks weren't used, which
+# was true at the time and led to 3 scheduled posts sitting unpublished for
+# two months while this service sat disabled — see publish_scheduler.py.)
+# Enabling this unit today is purely an optional, redundant second poller
+# for research/ideation/production/market_research jobs, which are normally
+# fired immediately via BackgroundTasks anyway.
 
 [Service]
 Type=simple
