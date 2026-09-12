@@ -231,6 +231,16 @@ def run_ideation(
         "",
         f"TARGET PLATFORM: {platform}",
     ]
+    if platform == "tiktok":
+        # TikTok is video-only (unlike Instagram/Facebook, which also take
+        # photos) and lives or dies on its first 1-3 seconds — every idea
+        # for this platform needs a concrete visual hook, not just a caption.
+        user_parts.append(
+            "TikTok is video-only — every idea must describe a specific opening "
+            "shot/hook (the first 1-3 seconds), not just caption copy. Favor "
+            "quick-cut, behind-the-scenes, or trend-participation formats over "
+            "static/posed shots."
+        )
 
     if brand_assets_block:
         user_parts += ["", brand_assets_block]

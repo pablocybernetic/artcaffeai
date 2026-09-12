@@ -62,12 +62,14 @@ from ads_routes import router as ads_router
 from brand_assets_routes import router as brand_assets_router
 from locations_routes import router as locations_router, internal_router as locations_internal_router
 from locations_public_routes import router as locations_public_router
+from tiktok_routes import router as tiktok_router
 import master_scheduler
 import reminder_scheduler
 import meta_sync_scheduler
 import data_snapshot_scheduler
 import locations_scheduler
 import publish_scheduler
+import tiktok_sync_scheduler
 
 # ---------------------------------------------------------------------------
 # Config
@@ -89,7 +91,9 @@ async def lifespan(app: FastAPI):
     await data_snapshot_scheduler.start(sb)
     await locations_scheduler.start(sb)
     await publish_scheduler.start(sb)
+    await tiktok_sync_scheduler.start(sb)
     yield
+    await tiktok_sync_scheduler.stop()
     await publish_scheduler.stop()
     await locations_scheduler.stop()
     await data_snapshot_scheduler.stop()
@@ -118,6 +122,7 @@ app.include_router(brand_assets_router)
 app.include_router(locations_router)
 app.include_router(locations_internal_router)
 app.include_router(locations_public_router)
+app.include_router(tiktok_router)
 
 
 # ---------------------------------------------------------------------------

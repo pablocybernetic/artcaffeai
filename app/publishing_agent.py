@@ -57,6 +57,18 @@ PLATFORM_GUIDES: dict[str, dict] = {
         "hashtag_count": 0,
         "style": "Max 90 chars. Lead with the benefit. Strong call-to-action verb.",
     },
+    "tiktok": {
+        "tone": "casual, fast-paced, entertaining — not an ad, a video someone would actually watch",
+        "caption_limit": 2200,
+        "hashtag_count": 4,
+        "style": (
+            "Hook in the first line — TikTok viewers decide to keep watching within "
+            "the first 1-3 seconds, and the caption's opening line matters as much as "
+            "the video's opening frame. Short, punchy sentences. Trend-aware language "
+            "over polished brand voice. 3-4 hashtags, mixing a broad one "
+            "(#fyp/#foryou-style) with niche/local ones."
+        ),
+    },
 }
 
 

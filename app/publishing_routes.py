@@ -19,7 +19,11 @@ Open-source publishing skills (see publishing_agent.py):
   These run before every publish and fall back gracefully if unavailable.
 
 Supported platforms:
-  instagram, facebook, linkedin, google_ads, twitter, whatsapp
+  instagram, facebook, linkedin, google_ads, twitter, whatsapp, tiktok
+
+TikTok credentials are managed separately, in tiktok_routes.py — see
+that file's docstring for why (OAuth user-consent flow vs. everyone
+else's pasted long-lived token).
 """
 from __future__ import annotations
 
@@ -59,6 +63,10 @@ from publishers.twitter_publisher import (
 from publishers.whatsapp_publisher import (
     post_whatsapp,
     test_credentials as test_whatsapp,
+)
+from publishers.tiktok_publisher import (
+    post_tiktok_video,
+    test_credentials as test_tiktok,
 )
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
@@ -184,6 +192,7 @@ CALENDAR_PLATFORM_BY_PUBLISHER = {
     "facebook": "meta_ads",
     "linkedin": "linkedin_organic",
     "google_ads": "google_ads",
+    "tiktok": "tiktok_organic",
 }
 
 
@@ -390,6 +399,27 @@ def _execute_publish(
                 _save_publish_result(sb_client=sb_client, content_item_id=content_item_id, concept_id=concept_id, platform=platform, result=r)
                 results[platform] = {"ok": True, **r}
 
+            elif platform == "tiktok":
+                creds = _get_creds("tiktok", concept_id=concept_id, sb_client=sb_client)
+                if not creds:
+                    raise RuntimeError("TikTok credentials not configured for this brand — connect it in Settings → Social publishing")
+                if not video_url:
+                    raise RuntimeError("TikTok requires a video asset — generate a video first (TikTok has no photo-post option)")
+
+                from connectors.tiktok_auth import ensure_fresh_token  # noqa: PLC0415
+                access_token = ensure_fresh_token(sb_client, concept_id, creds)
+                extra = creds.get("extra_json") or {}
+                text = f"{headline}\n\n{opt_caption}" + (f"\n\n{hashtag_str}" if hashtag_str else "")
+
+                r = post_tiktok_video(
+                    open_id=extra.get("open_id", ""),
+                    access_token=access_token,
+                    video_url=video_url,
+                    caption=text,
+                )
+                _save_publish_result(sb_client=sb_client, content_item_id=content_item_id, concept_id=concept_id, platform=platform, result=r)
+                results[platform] = {"ok": True, **r}
+
             elif platform == "linkedin":
                 creds = _get_creds("linkedin", sb_client)
                 if not creds:
@@ -543,6 +573,9 @@ class SchedulePublishRequest(PublishRequest):
 
 class CredentialsSaveRequest(BaseModel):
     platform: str                 # "meta" | "linkedin" | "google_ads" | "twitter" | "whatsapp"
+    # NOTE: "tiktok" credentials are never saved through this endpoint —
+    # TikTok requires an OAuth user-consent flow per account (see
+    # tiktok_routes.py's /tiktok/oauth/* endpoints), not a pasted token.
     concept_id: Optional[str] = None       # required for "meta" — brand (market/restaurant/gastro_bar) this account belongs to
     access_token: Optional[str] = None
     page_id: Optional[str] = None          # Facebook Page ID  /  WhatsApp: to_number
@@ -677,11 +710,12 @@ def get_credentials(concept_id: Optional[str] = None):
     for row in (rows.data or []):
         platform = row["platform"]
         row_concept_id = row.get("concept_id")
-        if platform == "meta":
+        if platform in ("meta", "tiktok"):
             if concept_id and row_concept_id != concept_id:
                 continue
             if not concept_id and row_concept_id is not None:
                 continue
+        extra = row.get("extra_json") or {}
         status[platform] = {
             "connected": bool(row.get("access_token")),
             "account_name": row.get("account_name"),
@@ -696,6 +730,8 @@ def get_credentials(concept_id: Optional[str] = None):
             "campaign_id": row.get("campaign_id"),
             "ad_group_id": row.get("ad_group_id"),
             "final_url": row.get("final_url"),
+            # TikTok
+            "open_id": extra.get("open_id") if platform == "tiktok" else None,
         }
     return {"credentials": status}
 
@@ -765,12 +801,16 @@ def save_credentials(req: CredentialsSaveRequest):
 @router.post("/test/{platform}")
 def test_platform(platform: str, concept_id: Optional[str] = None):
     """Test current credentials for a platform without posting."""
-    creds = _get_creds(platform, concept_id=concept_id if platform == "meta" else None)
+    creds = _get_creds(platform, concept_id=concept_id if platform in ("meta", "tiktok") else None)
     if not creds:
         raise HTTPException(404, f"No credentials saved for platform: {platform}")
 
     try:
-        if platform == "meta":
+        if platform == "tiktok":
+            from connectors.tiktok_auth import ensure_fresh_token  # noqa: PLC0415
+            access_token = ensure_fresh_token(sb, concept_id, creds)
+            result = test_tiktok(access_token=access_token)
+        elif platform == "meta":
             result = test_meta(access_token=creds["access_token"], page_id=creds["page_id"])
         elif platform == "linkedin":
             result = test_linkedin(access_token=creds["access_token"], org_id=creds["org_id"])
@@ -801,7 +841,7 @@ def test_platform(platform: str, concept_id: Optional[str] = None):
     # Update account_name if test returned one
     if result.get("account_name"):
         q = sb.table("platform_credentials").update({"account_name": result["account_name"]}).eq("platform", platform)
-        q = q.eq("concept_id", concept_id) if (platform == "meta" and concept_id) else q.is_("concept_id", "null")
+        q = q.eq("concept_id", concept_id) if (platform in ("meta", "tiktok") and concept_id) else q.is_("concept_id", "null")
         q.execute()
 
     return result
