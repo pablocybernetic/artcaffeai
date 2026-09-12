@@ -381,15 +381,15 @@ def _snapshot_concept(concept_id: str) -> dict:
 @router.get("/social-posts")
 def get_social_posts(
     concept_id: Optional[str] = None,
-    platform: Optional[str] = None,   # "instagram" | "facebook" | None = both
+    platform: Optional[str] = None,   # "instagram" | "facebook" | "tiktok" | None = all
     start: Optional[str] = None,      # YYYY-MM-DD
     end: Optional[str] = None,        # YYYY-MM-DD
     limit: int = 200,
 ):
     """
-    Browse the full archive of Instagram + Facebook posts ever synced
-    (social_posts is upserted by every /data/ads/meta/organic/sync run, so
-    it accumulates history beyond whatever the latest snapshot's date
+    Browse the full archive of Instagram + Facebook + TikTok posts ever
+    synced (social_posts is upserted by every meta/tiktok organic sync run,
+    so it accumulates history beyond whatever the latest snapshot's date
     window covers). Supports filtering by concept, platform, and date range.
     """
     q = sb.table("social_posts").select("*").order("posted_at", desc=True).limit(min(limit, 500))
