@@ -73,6 +73,11 @@ def _wait_for_publish(publish_id: str, access_token: str, client: httpx.Client) 
     raise RuntimeError(f"TikTok publish did not complete within {_STATUS_POLL_TIMEOUT}s (still processing)")
 
 
+def _query_creator_info(access_token: str, client: httpx.Client) -> dict:
+    r = client.post(f"{API_BASE}/post/publish/creator_info/query/", json={}, headers=_headers(access_token))
+    return _handle(r, "creator info query")
+
+
 def post_tiktok_video(
     *,
     open_id: str,  # noqa: ARG001 -- not required by the API itself (token scopes the account), kept for symmetry/logging with other publishers
@@ -86,24 +91,35 @@ def post_tiktok_video(
 ) -> dict:
     """
     Direct Post, video, PULL_FROM_URL source:
-      1. Init publish (TikTok starts pulling the video from video_url)
-      2. Poll status until PUBLISH_COMPLETE
+      1. Query creator_info — TikTok requires this call before every publish
+         (it's a documented compliance step, not just a UI nicety) and it's
+         also the only way to know which privacy_level values this specific
+         creator account actually allows; sending one outside that list (or
+         skipping the query entirely) gets rejected citing the content
+         sharing guidelines.
+      2. Init publish (TikTok starts pulling the video from video_url)
+      3. Poll status until PUBLISH_COMPLETE
     caption maps to TikTok's "title" field (shown as the post description).
     """
-    body = {
-        "post_info": {
-            "title": caption[:2200],  # TikTok's caption limit
-            "privacy_level": privacy_level,
-            "disable_duet": disable_duet,
-            "disable_comment": disable_comment,
-            "disable_stitch": disable_stitch,
-        },
-        "source_info": {
-            "source": "PULL_FROM_URL",
-            "video_url": video_url,
-        },
-    }
     with httpx.Client(timeout=45.0) as c:
+        creator = _query_creator_info(access_token, c)
+        allowed_privacy = creator.get("privacy_level_options") or []
+        if privacy_level not in allowed_privacy:
+            privacy_level = "SELF_ONLY" if "SELF_ONLY" in allowed_privacy else (allowed_privacy[0] if allowed_privacy else privacy_level)
+
+        body = {
+            "post_info": {
+                "title": caption[:2200],  # TikTok's caption limit
+                "privacy_level": privacy_level,
+                "disable_duet": disable_duet or bool(creator.get("duet_disabled")),
+                "disable_comment": disable_comment or bool(creator.get("comment_disabled")),
+                "disable_stitch": disable_stitch or bool(creator.get("stitch_disabled")),
+            },
+            "source_info": {
+                "source": "PULL_FROM_URL",
+                "video_url": video_url,
+            },
+        }
         r1 = c.post(f"{API_BASE}/post/publish/video/init/", json=body, headers=_headers(access_token))
         init_data = _handle(r1, "init video publish")
         publish_id = init_data["publish_id"]
