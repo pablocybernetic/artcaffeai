@@ -580,6 +580,7 @@ class CredentialsSaveRequest(BaseModel):
     access_token: Optional[str] = None
     page_id: Optional[str] = None          # Facebook Page ID  /  WhatsApp: to_number
     ig_user_id: Optional[str] = None       # Instagram User ID / WhatsApp: phone_number_id
+    ad_account_id: Optional[str] = None    # Meta Ad Account ID (Ads management + Meta Ads reporting sync)
     org_id: Optional[str] = None           # LinkedIn Org ID
     developer_token: Optional[str] = None  # Google Ads / Twitter: api_key
     customer_id: Optional[str] = None      # Google Ads
@@ -723,6 +724,7 @@ def get_credentials(concept_id: Optional[str] = None):
             # Meta
             "page_id": row.get("page_id"),
             "ig_user_id": row.get("ig_user_id"),
+            "ad_account_id": row.get("ad_account_id"),
             # LinkedIn
             "org_id": row.get("org_id"),
             # Google Ads
@@ -760,6 +762,8 @@ def save_credentials(req: CredentialsSaveRequest):
             row["page_id"] = req.page_id
         if req.ig_user_id:
             row["ig_user_id"] = req.ig_user_id
+        if req.ad_account_id:
+            row["ad_account_id"] = req.ad_account_id
     elif req.platform == "linkedin":
         if req.org_id:
             row["org_id"] = req.org_id
