@@ -95,7 +95,10 @@ def sync_tiktok_organic(
     user = account.get("user") or {}
 
     # 2. Video list (up to 50, newest first) + per-video stats in the same call
-    videos_resp = _post(f"{API_BASE}/video/list/", access_token, {"max_count": 50}, params={
+    # TikTok caps max_count at 20 per call — pagination via the returned
+    # cursor would be needed to fetch more, not implemented here since 20
+    # most-recent videos is enough for this dashboard's purposes today.
+    videos_resp = _post(f"{API_BASE}/video/list/", access_token, {"max_count": 20}, params={
         "fields": "id,title,cover_image_url,share_url,create_time,view_count,like_count,comment_count,share_count",
     })
     raw_videos = videos_resp.get("videos") or []
