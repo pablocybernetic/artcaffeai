@@ -14,6 +14,8 @@ Credentials required (from platform_credentials table, platform="meta"):
 """
 from __future__ import annotations
 
+import mimetypes
+import os
 from datetime import date, timedelta
 from typing import Any
 
@@ -22,12 +24,79 @@ from supabase import Client
 
 GRAPH_BASE = "https://graph.facebook.com/v21.0"
 
+# Meta's thumbnail_url/media_url are signed CDN links that expire (see the
+# `oe=` param) a few days after being fetched. Once a post ages out of the
+# most-recent-N window this connector re-syncs, its URL is never refreshed
+# again and eventually 403s -- so every post's media gets downloaded once
+# and re-hosted in our own Storage bucket, which never expires.
+STORAGE_BUCKET = os.environ.get("ASSETS_BUCKET", "generated-assets")
+_REHOSTED_MARKER = "/storage/v1/object/public/"
+
 
 def _get(url: str, params: dict, timeout: float = 30.0) -> dict:
     resp = httpx.get(url, params=params, timeout=timeout)
     if not resp.is_success:
         raise RuntimeError(f"Meta Graph API {resp.status_code}: {resp.text[:400]}")
     return resp.json()
+
+
+def _is_rehosted(url: str | None) -> bool:
+    return bool(url) and _REHOSTED_MARKER in url
+
+
+def _fetch_existing_media(sb: Client, concept_id: str, platform: str) -> dict[str, dict]:
+    """One bulk lookup per sync (not per-post) of what's already stored, so
+    already-rehosted posts are never re-downloaded."""
+    try:
+        res = (
+            sb.table("social_posts")
+            .select("post_id,media_url,thumbnail_url")
+            .eq("concept_id", concept_id)
+            .eq("platform", platform)
+            .execute()
+        )
+        return {r["post_id"]: r for r in (res.data or [])}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _rehost(sb: Client, url: str | None, storage_path_prefix: str) -> str | None:
+    if not url:
+        return None
+    try:
+        resp = httpx.get(url, timeout=60.0, follow_redirects=True)
+        if not resp.is_success:
+            return None
+        content_type = (resp.headers.get("content-type") or "").split(";")[0].strip() or "application/octet-stream"
+        ext = mimetypes.guess_extension(content_type) or ""
+        storage_path = f"{storage_path_prefix}{ext}"
+        sb.storage.from_(STORAGE_BUCKET).upload(
+            storage_path,
+            resp.content,
+            file_options={"content-type": content_type, "upsert": "true"},
+        )
+        return sb.storage.from_(STORAGE_BUCKET).get_public_url(storage_path)
+    except Exception as e:  # noqa: BLE001
+        print(f"[meta_organic] re-host failed for {storage_path_prefix}: {e}", flush=True)
+        return None
+
+
+def _rehost_pair(
+    sb: Client,
+    existing: dict | None,
+    media_url: str | None,
+    thumbnail_url: str | None,
+    base_path: str,
+) -> tuple[str | None, str | None]:
+    """Returns (media_url, thumbnail_url) to actually store. Skips
+    re-downloading entirely once both are already pointing at our own
+    Storage bucket; falls back to Meta's (temporarily valid) URL if a
+    download/upload fails, rather than losing the post's media entirely."""
+    if existing and _is_rehosted(existing.get("thumbnail_url")) and _is_rehosted(existing.get("media_url")):
+        return existing.get("media_url"), existing.get("thumbnail_url")
+    new_thumb = _rehost(sb, thumbnail_url, f"{base_path}/thumb") or thumbnail_url
+    new_media = _rehost(sb, media_url, f"{base_path}/media") or media_url
+    return new_media, new_thumb
 
 
 def _carousel_cover(media_id: str, access_token: str) -> dict:
@@ -151,24 +220,31 @@ def sync_meta_organic(
 
         # 3b. Upsert individual posts into social_posts for AI system knowledge
         if all_posts:
-            post_rows = [
-                {
+            existing_ig = _fetch_existing_media(sb, concept_id, "instagram")
+            post_rows = []
+            for p in all_posts:
+                media_url, thumbnail_url = _rehost_pair(
+                    sb,
+                    existing_ig.get(p["id"]),
+                    p.get("media_url"),
+                    p.get("thumbnail_url"),
+                    f"synced-posts/{concept_id}/instagram/{p['id']}",
+                )
+                post_rows.append({
                     "concept_id": concept_id,
                     "platform": "instagram",
                     "post_id": p["id"],
                     "media_type": p.get("media_type"),
                     "caption": p.get("caption"),
                     "permalink": p.get("permalink"),
-                    "media_url": p.get("media_url"),
-                    "thumbnail_url": p.get("thumbnail_url"),
+                    "media_url": media_url,
+                    "thumbnail_url": thumbnail_url,
                     "posted_at": p.get("timestamp"),
                     "like_count": int(p.get("like_count") or 0),
                     "comments_count": int(p.get("comments_count") or 0),
                     "insights": p.get("insights", {}),
                     "synced_at": end_dt.isoformat(),
-                }
-                for p in all_posts
-            ]
+                })
             try:
                 sb.table("social_posts").upsert(
                     post_rows,
@@ -222,6 +298,7 @@ def sync_meta_organic(
                 "limit": "50",
             })
             fb_raw_posts = fb_posts_resp.get("data", [])
+            existing_fb = _fetch_existing_media(sb, concept_id, "facebook")
             fb_post_rows = []
             for p in fb_raw_posts:
                 attachment = ((p.get("attachments") or {}).get("data") or [{}])[0]
@@ -242,6 +319,13 @@ def sync_meta_organic(
                     media_type = "IMAGE"
                     media_url = p.get("full_picture")
                     thumbnail_url = p.get("full_picture")
+                media_url, thumbnail_url = _rehost_pair(
+                    sb,
+                    existing_fb.get(p["id"]),
+                    media_url,
+                    thumbnail_url,
+                    f"synced-posts/{concept_id}/facebook/{p['id']}",
+                )
                 fb_post_rows.append({
                     "concept_id": concept_id,
                     "platform": "facebook",
