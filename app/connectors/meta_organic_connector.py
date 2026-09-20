@@ -214,28 +214,49 @@ def sync_meta_organic(
         try:
             fb_posts_resp = _get(f"{GRAPH_BASE}/{page_id}/posts", {
                 "access_token": page_token,
-                "fields": "id,message,created_time,permalink_url,full_picture,likes.summary(true),comments.summary(true),shares",
+                "fields": (
+                    "id,message,created_time,permalink_url,full_picture,"
+                    "likes.summary(true),comments.summary(true),shares,"
+                    "attachments{media_type,media}"
+                ),
                 "limit": "50",
             })
             fb_raw_posts = fb_posts_resp.get("data", [])
-            fb_post_rows = [
-                {
+            fb_post_rows = []
+            for p in fb_raw_posts:
+                attachment = ((p.get("attachments") or {}).get("data") or [{}])[0]
+                attachment_type = attachment.get("media_type")
+                media = attachment.get("media") or {}
+                # A video attachment's actual playable file lives at
+                # media.source (an mp4 URL) -- full_picture is only ever a
+                # static preview frame, never usable for playback.
+                if attachment_type == "video" and media.get("source"):
+                    media_type = "VIDEO"
+                    media_url = media["source"]
+                    thumbnail_url = (media.get("image") or {}).get("src") or p.get("full_picture")
+                elif attachment_type == "album":
+                    media_type = "CAROUSEL_ALBUM"
+                    media_url = p.get("full_picture")
+                    thumbnail_url = p.get("full_picture")
+                else:
+                    media_type = "IMAGE"
+                    media_url = p.get("full_picture")
+                    thumbnail_url = p.get("full_picture")
+                fb_post_rows.append({
                     "concept_id": concept_id,
                     "platform": "facebook",
                     "post_id": p["id"],
-                    "media_type": "post",
+                    "media_type": media_type,
                     "caption": p.get("message"),
                     "permalink": p.get("permalink_url"),
-                    "media_url": p.get("full_picture"),
-                    "thumbnail_url": p.get("full_picture"),
+                    "media_url": media_url,
+                    "thumbnail_url": thumbnail_url,
                     "posted_at": p.get("created_time"),
                     "like_count": int(((p.get("likes") or {}).get("summary") or {}).get("total_count") or 0),
                     "comments_count": int(((p.get("comments") or {}).get("summary") or {}).get("total_count") or 0),
                     "insights": {"shares": int((p.get("shares") or {}).get("count") or 0)},
                     "synced_at": end_dt.isoformat(),
-                }
-                for p in fb_raw_posts
-            ]
+                })
             if fb_post_rows:
                 sb.table("social_posts").upsert(
                     fb_post_rows,
