@@ -31,10 +31,11 @@ TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"
 
 # video.publish: Content Posting API (Direct Post)
 # video.upload: required alongside video.publish for the init/publish flow
-# user.info.basic: display name/avatar
+# user.info.profile: display name/avatar — TikTok deprecated user.info.basic
+#   in favor of this scope; new apps can no longer request the old name
 # user.info.stats: follower_count/likes_count/video_count (organic analytics)
 # video.list: list this user's own videos + per-video stats
-DEFAULT_SCOPES = "user.info.basic,user.info.stats,video.list,video.publish,video.upload"
+DEFAULT_SCOPES = "user.info.profile,user.info.stats,video.list,video.publish,video.upload"
 
 
 def build_authorize_url(*, client_key: str, redirect_uri: str, state: str, scopes: str = DEFAULT_SCOPES) -> str:
