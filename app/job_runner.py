@@ -418,6 +418,101 @@ def run_job(job_id: str) -> dict:
                 pass
             return {"ok": False, "job_id": job_id, "error": err}
 
+    # ------------------------------------------------------------------
+    # WhatsApp Campaign Send
+    # ------------------------------------------------------------------
+    if agent_type == "whatsapp_campaign_send":
+        from publishers.whatsapp_publisher import send_whatsapp_template  # noqa: PLC0415
+
+        try:
+            _mark_running(job_id)
+
+            creds_res = (
+                sb.table("platform_credentials")
+                .select("*")
+                .eq("platform", "whatsapp")
+                .eq("is_active", True)
+                .is_("concept_id", "null")
+                .maybe_single()
+                .execute()
+            )
+            creds = creds_res.data if creds_res else None
+            if not creds:
+                _mark_failed(job_id, "WhatsApp credentials not configured")
+                return {"ok": False, "job_id": job_id, "error": "WhatsApp credentials not configured"}
+
+            pending = (
+                sb.table("whatsapp_campaign_sends")
+                .select("*")
+                .eq("job_id", job_id)
+                .eq("status", "pending")
+                .execute()
+                .data or []
+            )
+
+            # Batched with a pause between batches — same shape as
+            # google_location_sync_service.py's sync_all_locations, the
+            # only rate-limiting precedent in this backend.
+            BATCH_SIZE = 5
+            PAUSE_SECONDS = 1.0
+            sent_count = 0
+            failed_count = 0
+            for i in range(0, len(pending), BATCH_SIZE):
+                batch = pending[i:i + BATCH_SIZE]
+                for send_row in batch:
+                    contact = (
+                        sb.table("whatsapp_contacts")
+                        .select("phone_number")
+                        .eq("id", send_row["contact_id"])
+                        .maybe_single()
+                        .execute()
+                        .data
+                    )
+                    if not contact:
+                        sb.table("whatsapp_campaign_sends").update({
+                            "status": "failed",
+                            "error_message": "contact not found",
+                        }).eq("id", send_row["id"]).execute()
+                        failed_count += 1
+                        continue
+                    try:
+                        result = send_whatsapp_template(
+                            phone_number_id=creds["ig_user_id"],
+                            access_token=creds["access_token"],
+                            to_number=contact["phone_number"],
+                            template_name=payload["template_name"],
+                            language_code=payload["language_code"],
+                            body_params=payload.get("body_params") or [],
+                        )
+                        sb.table("whatsapp_campaign_sends").update({
+                            "status": "sent",
+                            "wa_message_id": result.get("post_id"),
+                            "sent_at": _now(),
+                        }).eq("id", send_row["id"]).execute()
+                        sent_count += 1
+                    except Exception as e:  # noqa: BLE001
+                        # One contact's failure doesn't stop the batch — the
+                        # job itself still succeeds, reporting per-contact counts.
+                        sb.table("whatsapp_campaign_sends").update({
+                            "status": "failed",
+                            "error_message": str(e)[:300],
+                        }).eq("id", send_row["id"]).execute()
+                        failed_count += 1
+                if i + BATCH_SIZE < len(pending):
+                    time.sleep(PAUSE_SECONDS)
+
+            result_dict = {"sent": sent_count, "failed": failed_count}
+            _mark_succeeded(job_id, result_dict)
+            return {"ok": True, "job_id": job_id, "result": result_dict}
+        except Exception as e:  # noqa: BLE001
+            err = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            print(f"[job_runner] FAILED {job_id}: {err}", file=sys.stderr, flush=True)
+            try:
+                _mark_failed(job_id, err)
+            except Exception:  # noqa: BLE001
+                pass
+            return {"ok": False, "job_id": job_id, "error": err}
+
     # Unknown agent type — skip
     return {"ok": True, "skipped": True, "reason": f"unknown_agent_type:{agent_type}"}
 
@@ -430,7 +525,7 @@ def _claim_next_pending() -> Optional[dict]:
         sb.table("jobs")
         .select("id,agent_type,input_payload")
         .eq("status", "pending")
-        .in_("agent_type", ["research", "ideation", "production", "market_research", "scheduled_publish"])
+        .in_("agent_type", ["research", "ideation", "production", "market_research", "scheduled_publish", "whatsapp_campaign_send"])
         .order("created_at", desc=False)
         .limit(20)
         .execute()

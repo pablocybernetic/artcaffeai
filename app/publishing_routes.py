@@ -68,6 +68,7 @@ from publishers.tiktok_publisher import (
     post_tiktok_video,
     test_credentials as test_tiktok,
 )
+from secrets_crypto import encrypt_value, decrypt_value, mask_value
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
@@ -421,7 +422,7 @@ def _execute_publish(
                 results[platform] = {"ok": True, **r}
 
             elif platform == "linkedin":
-                creds = _get_creds("linkedin", sb_client)
+                creds = _get_creds("linkedin", concept_id=None, sb_client=sb_client)
                 if not creds:
                     raise RuntimeError("LinkedIn credentials not configured")
                 text = f"{headline}\n\n{opt_caption}" + (f"\n\n{hashtag_str}" if hashtag_str else "")
@@ -435,7 +436,7 @@ def _execute_publish(
                 results[platform] = {"ok": True, **r}
 
             elif platform == "twitter":
-                creds = _get_creds("twitter", sb_client)
+                creds = _get_creds("twitter", concept_id=None, sb_client=sb_client)
                 if not creds:
                     raise RuntimeError("Twitter credentials not configured")
                 extra = creds.get("extra_json") or {}
@@ -452,7 +453,7 @@ def _execute_publish(
                 results[platform] = {"ok": True, **r}
 
             elif platform == "whatsapp":
-                creds = _get_creds("whatsapp", sb_client)
+                creds = _get_creds("whatsapp", concept_id=None, sb_client=sb_client)
                 if not creds:
                     raise RuntimeError("WhatsApp credentials not configured")
                 # phone_number_id stored in ig_user_id, to_number stored in page_id
@@ -468,7 +469,7 @@ def _execute_publish(
                 results[platform] = {"ok": True, **r}
 
             elif platform == "google_ads":
-                creds = _get_creds("google_ads", sb_client)
+                creds = _get_creds("google_ads", concept_id=None, sb_client=sb_client)
                 if not creds:
                     raise RuntimeError("Google Ads credentials not configured — add them in Settings → Google Ads")
                 headlines_list = [headline] if headline else ["Artcaffe — Premium Café"]
@@ -591,6 +592,9 @@ class CredentialsSaveRequest(BaseModel):
     # Twitter extra fields stored in extra_json
     api_key_secret: Optional[str] = None          # Twitter API Key Secret
     access_token_secret: Optional[str] = None     # Twitter Access Token Secret
+    # WhatsApp extra fields, encrypted at rest in extra_json (see secrets_crypto.py)
+    whatsapp_app_secret: Optional[str] = None            # Meta App Secret — Phase 2 HMAC verification
+    whatsapp_webhook_verify_token: Optional[str] = None  # Phase 2 webhook GET handshake
 
 
 class TestRequest(BaseModel):
@@ -735,6 +739,22 @@ def get_credentials(concept_id: Optional[str] = None):
             # TikTok
             "open_id": extra.get("open_id") if platform == "tiktok" else None,
         }
+        if platform == "whatsapp":
+            status[platform]["waba_id"] = row.get("org_id")
+            try:
+                status[platform]["app_secret_masked"] = (
+                    mask_value(decrypt_value(extra["app_secret_enc"])) if extra.get("app_secret_enc") else None
+                )
+            except ValueError:
+                # Stale/corrupt encrypted value shouldn't crash the whole
+                # status endpoint — just show as not-configured.
+                status[platform]["app_secret_masked"] = None
+            try:
+                status[platform]["webhook_verify_token_masked"] = (
+                    mask_value(decrypt_value(extra["webhook_verify_token_enc"])) if extra.get("webhook_verify_token_enc") else None
+                )
+            except ValueError:
+                status[platform]["webhook_verify_token_masked"] = None
     return {"credentials": status}
 
 
@@ -791,11 +811,33 @@ def save_credentials(req: CredentialsSaveRequest):
         if extra:
             row["extra_json"] = extra
     elif req.platform == "whatsapp":
-        # phone_number_id stored in ig_user_id; to_number stored in page_id
+        # phone_number_id stored in ig_user_id; to_number stored in page_id;
+        # WABA ID reuses org_id (same overloading as ig_user_id/page_id above)
         if req.ig_user_id:
             row["ig_user_id"] = req.ig_user_id
         if req.page_id:
             row["page_id"] = req.page_id
+        if req.org_id:
+            row["org_id"] = req.org_id
+        if req.whatsapp_app_secret or req.whatsapp_webhook_verify_token:
+            # Merge into whatever extra_json already exists rather than
+            # overwriting — an update()'s extra_json is a whole-column
+            # replace, so fetch-then-merge is required to avoid clobbering
+            # the other encrypted field when only one is being changed.
+            existing_res = (
+                sb.table("platform_credentials")
+                .select("extra_json")
+                .eq("platform", "whatsapp")
+                .is_("concept_id", "null")
+                .maybe_single()
+                .execute()
+            )
+            extra = dict((existing_res.data or {}).get("extra_json") or {}) if existing_res else {}
+            if req.whatsapp_app_secret:
+                extra["app_secret_enc"] = encrypt_value(req.whatsapp_app_secret)
+            if req.whatsapp_webhook_verify_token:
+                extra["webhook_verify_token_enc"] = encrypt_value(req.whatsapp_webhook_verify_token)
+            row["extra_json"] = extra
 
     _upsert_platform_credentials(sb, row, req.concept_id)
 

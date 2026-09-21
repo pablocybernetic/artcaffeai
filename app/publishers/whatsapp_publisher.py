@@ -78,6 +78,59 @@ def post_whatsapp(
     return {"post_id": msg_id, "post_url": None}
 
 
+def send_whatsapp_template(
+    phone_number_id: str,
+    access_token: str,
+    to_number: str,
+    template_name: str,
+    language_code: str,
+    body_params: list[str],
+) -> dict:
+    """
+    Send a pre-approved template message — the only message type Meta
+    permits sending outside the 24h customer-initiated window, so this is
+    the actual send path for proactive marketing broadcasts (post_whatsapp
+    above only works within that window, e.g. replying to a customer).
+
+    body_params fill the template's numbered {{1}}, {{2}}, ... body
+    variables in order (v1 scope: body-only templates, no header/buttons).
+    """
+    url = f"{GRAPH_API}/{phone_number_id}/messages"
+    body: dict = {
+        "messaging_product": "whatsapp",
+        "to": to_number,
+        "type": "template",
+        "template": {
+            "name": template_name,
+            "language": {"code": language_code},
+        },
+    }
+    if body_params:
+        body["template"]["components"] = [{
+            "type": "body",
+            "parameters": [{"type": "text", "text": p} for p in body_params],
+        }]
+    resp = httpx.post(url, json=body, headers=_headers(access_token), timeout=20)
+    resp.raise_for_status()
+    data = resp.json()
+    msg_id = (data.get("messages") or [{}])[0].get("id")
+    return {"post_id": msg_id, "post_url": None}
+
+
+def list_message_templates(waba_id: str, access_token: str) -> list[dict]:
+    """List this WABA's message templates, filtered to APPROVED — PENDING
+    and REJECTED ones exist in the API response too but aren't sendable."""
+    resp = httpx.get(
+        f"{GRAPH_API}/{waba_id}/message_templates",
+        params={"fields": "name,status,language,category,components"},
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    templates = resp.json().get("data", [])
+    return [t for t in templates if t.get("status") == "APPROVED"]
+
+
 def test_credentials(phone_number_id: str, access_token: str) -> dict:
     """Verify credentials by fetching the phone number metadata."""
     resp = httpx.get(
