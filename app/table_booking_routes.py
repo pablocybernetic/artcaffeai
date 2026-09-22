@@ -1,0 +1,418 @@
+"""
+table_booking_routes.py
+--------------------------
+Table booking submissions for the dine-in reservation form. The form
+itself lives in the frontend (frontend/src/routes/book-table.tsx) as a
+standalone, unauthenticated page the user embeds into the Shopify
+storefront via <iframe> themselves — this backend never touches the
+Shopify theme.
+
+Two routers, mirroring locations_routes.py + locations_public_routes.py's
+exact admin/public split:
+
+  Public (no auth — CORS allowlist + nothing secret returned):
+    POST /api/public/table-bookings
+
+  Admin (X-Api-Key, module-local require_api_key copy):
+    GET   /table-bookings
+    PATCH /table-bookings/{id}
+    GET   /table-bookings/settings
+    POST  /table-bookings/settings
+    POST  /table-bookings/settings/test-sms
+"""
+from __future__ import annotations
+
+import os
+from datetime import datetime, timezone
+from typing import Optional
+
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
+from pydantic import BaseModel
+from supabase import Client, create_client
+
+import app_settings
+import notification_service
+from connectors import onfon_sms_connector
+from secrets_crypto import decrypt_value, encrypt_value, mask_value
+
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+API_KEY = os.environ.get("FASTAPI_API_KEY")
+
+sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+SETTINGS_KEY = "sms_provider_credentials"
+LARGE_PARTY_THRESHOLD = 12
+
+
+def require_api_key(x_api_key: Optional[str] = Header(None)) -> None:
+    if not API_KEY:
+        return
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+public_router = APIRouter(prefix="/api/public")
+router = APIRouter(prefix="/table-bookings", dependencies=[Depends(require_api_key)])
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# SMS credentials (app_settings, same pattern as tiktok_routes.py)
+# ---------------------------------------------------------------------------
+def _sms_settings() -> dict:
+    return app_settings.get_setting(sb, SETTINGS_KEY, {}) or {}
+
+
+def _maybe_decrypt(enc: Optional[str]) -> Optional[str]:
+    if not enc:
+        return None
+    try:
+        return decrypt_value(enc)
+    except ValueError:
+        return None
+
+
+def _sms_credentials() -> Optional[dict]:
+    """Returns {api_key, client_id, access_key, sender_id} or None if not
+    fully configured."""
+    saved = _sms_settings()
+    api_key = _maybe_decrypt(saved.get("api_key_enc"))
+    access_key = _maybe_decrypt(saved.get("access_key_enc"))
+    client_id = saved.get("client_id")
+    if not (api_key and access_key and client_id):
+        return None
+    return {
+        "api_key": api_key,
+        "access_key": access_key,
+        "client_id": client_id,
+        "sender_id": saved.get("sender_id") or "OnfonInfo",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Public: create booking
+# ---------------------------------------------------------------------------
+class BookingCreate(BaseModel):
+    location_id: str
+    customer_name: str
+    party_size: int
+    booking_date: str
+    booking_time: str
+    phone: str
+    email: str
+    special_occasion: Optional[str] = None
+    seating_preference: str
+
+
+def _customer_email_html(booking: dict, location_name: str, confirmed: bool) -> tuple[str, str]:
+    if confirmed:
+        subject = f"Artcaffe — Your table at {location_name} is confirmed"
+        headline = "Your table is confirmed!"
+        body = (
+            f"We look forward to seeing you on <strong>{booking['booking_date']} at "
+            f"{booking['booking_time']}</strong> for a party of {booking['party_size']}."
+        )
+    else:
+        subject = f"Artcaffe — We've received your booking request for {location_name}"
+        headline = "We'll contact you within the hour"
+        body = (
+            f"Thanks for your booking request for a party of {booking['party_size']} on "
+            f"<strong>{booking['booking_date']} at {booking['booking_time']}</strong>. "
+            f"Groups larger than {LARGE_PARTY_THRESHOLD} need a quick check with the team — "
+            f"we'll call or message you shortly to confirm."
+        )
+    html = f"""
+<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1a1a1a;">
+  <div style="background:#1a1a1a;padding:20px 24px;border-radius:8px 8px 0 0;">
+    <p style="color:#fff;font-size:18px;font-weight:700;margin:0;">Artcaffe</p>
+  </div>
+  <div style="background:#fff;padding:24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+    <p style="font-size:16px;font-weight:700;color:#1a1a1a;">{headline}</p>
+    <p style="font-size:14px;color:#374151;">Hi {booking['customer_name']},</p>
+    <p style="font-size:14px;color:#374151;">{body}</p>
+    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:16px;margin:16px 0;font-size:13px;color:#374151;">
+      <p style="margin:0 0 6px;"><strong>Location:</strong> {location_name}</p>
+      <p style="margin:0 0 6px;"><strong>Date:</strong> {booking['booking_date']}</p>
+      <p style="margin:0 0 6px;"><strong>Time:</strong> {booking['booking_time']}</p>
+      <p style="margin:0 0 6px;"><strong>Party size:</strong> {booking['party_size']}</p>
+      <p style="margin:0;"><strong>Seating:</strong> {booking['seating_preference'].title()}</p>
+    </div>
+    <p style="font-size:12px;color:#9ca3af;margin-top:24px;">— Artcaffe</p>
+  </div>
+</div>
+"""
+    return subject, html
+
+
+def _customer_sms_text(booking: dict, location_name: str, confirmed: bool) -> str:
+    if confirmed:
+        return (
+            f"Artcaffe: Your table at {location_name} for {booking['party_size']} on "
+            f"{booking['booking_date']} at {booking['booking_time']} is confirmed. See you then!"
+        )
+    return (
+        f"Artcaffe: We've received your booking request at {location_name} for "
+        f"{booking['party_size']} on {booking['booking_date']} at {booking['booking_time']}. "
+        f"We'll contact you within the hour to confirm."
+    )
+
+
+def _staff_sms_text(booking: dict, location_name: str) -> str:
+    return (
+        f"New table booking ({booking['status']}): {booking['customer_name']}, "
+        f"party of {booking['party_size']}, {location_name}, {booking['booking_date']} "
+        f"{booking['booking_time']}. Phone: {booking['phone']}."
+    )
+
+
+def _send_booking_notifications(booking: dict, location_name: str) -> None:
+    """Fires customer email, customer SMS, and staff SMS independently —
+    one channel failing never blocks another, and the row always reflects
+    exactly what did/didn't go out."""
+    confirmed = booking["status"] == "confirmed"
+    update: dict = {}
+
+    subject, html = _customer_email_html(booking, location_name, confirmed)
+    try:
+        sent = notification_service._send_email(booking["email"], subject, html)
+        update["email_sent"] = sent
+        update["email_error"] = None if sent else "Email provider not configured or send failed"
+    except Exception as exc:  # noqa: BLE001
+        update["email_sent"] = False
+        update["email_error"] = str(exc)[:300]
+
+    creds = _sms_credentials()
+    if creds:
+        try:
+            onfon_sms_connector.send_sms(
+                to_number=booking["phone"],
+                text=_customer_sms_text(booking, location_name, confirmed),
+                api_key=creds["api_key"],
+                client_id=creds["client_id"],
+                access_key=creds["access_key"],
+                sender_id=creds["sender_id"],
+            )
+            update["sms_sent"] = True
+            update["sms_error"] = None
+        except Exception as exc:  # noqa: BLE001
+            update["sms_sent"] = False
+            update["sms_error"] = str(exc)[:300]
+
+        staff_phone = _sms_settings().get("staff_notification_phone")
+        if staff_phone:
+            try:
+                onfon_sms_connector.send_sms(
+                    to_number=staff_phone,
+                    text=_staff_sms_text(booking, location_name),
+                    api_key=creds["api_key"],
+                    client_id=creds["client_id"],
+                    access_key=creds["access_key"],
+                    sender_id=creds["sender_id"],
+                )
+                update["staff_notified"] = True
+                update["staff_notify_error"] = None
+            except Exception as exc:  # noqa: BLE001
+                update["staff_notified"] = False
+                update["staff_notify_error"] = str(exc)[:300]
+        else:
+            update["staff_notify_error"] = "No staff notification phone configured"
+    else:
+        update["sms_sent"] = False
+        update["sms_error"] = "SMS credentials not configured"
+        update["staff_notify_error"] = "SMS credentials not configured"
+
+    update["updated_at"] = _now()
+    sb.table("table_bookings").update(update).eq("id", booking["id"]).execute()
+
+
+@public_router.post("/table-bookings")
+def create_booking(body: BookingCreate, bg: BackgroundTasks):
+    if body.party_size <= 0:
+        raise HTTPException(400, "Party size must be at least 1")
+    if body.seating_preference not in ("flexible", "inside", "outside"):
+        raise HTTPException(400, "Invalid seating preference")
+
+    loc_res = (
+        sb.table("locations")
+        .select("id,name")
+        .eq("id", body.location_id)
+        .eq("status", "active")
+        .maybe_single()
+        .execute()
+    )
+    if not loc_res or not loc_res.data:
+        raise HTTPException(400, "Unknown or inactive location")
+    location_name = loc_res.data["name"]
+
+    status = "confirmed" if body.party_size <= LARGE_PARTY_THRESHOLD else "pending"
+    row = {
+        **body.dict(),
+        "status": status,
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    try:
+        res = sb.table("table_bookings").insert(row).execute()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"Could not create booking: {exc}") from exc
+    booking = (res.data or [None])[0]
+    if not booking:
+        raise HTTPException(500, "Booking was not created")
+
+    bg.add_task(_send_booking_notifications, booking, location_name)
+    return {"ok": True, "booking_id": booking["id"], "status": status}
+
+
+# ---------------------------------------------------------------------------
+# Admin: list + confirm/decline
+# ---------------------------------------------------------------------------
+@router.get("")
+def list_bookings(
+    location_id: Optional[str] = None,
+    status: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+):
+    q = sb.table("table_bookings").select("*").order("booking_date", desc=True).order("created_at", desc=True)
+    if location_id:
+        q = q.eq("location_id", location_id)
+    if status:
+        q = q.eq("status", status)
+    if date_from:
+        q = q.gte("booking_date", date_from)
+    if date_to:
+        q = q.lte("booking_date", date_to)
+    res = q.execute()
+    bookings = res.data or []
+
+    loc_ids = list({b["location_id"] for b in bookings if b.get("location_id")})
+    locations_by_id: dict[str, dict] = {}
+    if loc_ids:
+        loc_res = sb.table("locations").select("id,name,brand_type").in_("id", loc_ids).execute()
+        locations_by_id = {loc["id"]: loc for loc in (loc_res.data or [])}
+
+    for b in bookings:
+        loc = locations_by_id.get(b.get("location_id")) or {}
+        b["location_name"] = loc.get("name")
+        b["location_brand"] = loc.get("brand_type")
+
+    return {"ok": True, "bookings": bookings}
+
+
+class BookingStatusUpdate(BaseModel):
+    status: str
+
+
+@router.patch("/{booking_id}")
+def update_booking_status(booking_id: str, body: BookingStatusUpdate, bg: BackgroundTasks):
+    if body.status not in ("pending", "confirmed", "declined", "cancelled"):
+        raise HTTPException(400, "Invalid status")
+
+    res = sb.table("table_bookings").select("*").eq("id", booking_id).maybe_single().execute()
+    if not res or not res.data:
+        raise HTTPException(404, "Booking not found")
+    existing = res.data
+
+    update = {"status": body.status, "updated_at": _now()}
+    upd_res = sb.table("table_bookings").update(update).eq("id", booking_id).execute()
+    booking = (upd_res.data or [None])[0]
+    if not booking:
+        raise HTTPException(404, "Booking not found")
+
+    # Newly confirmed from pending, and notifications hadn't already gone out
+    # — fire them now the same way the auto-confirm path does.
+    if body.status == "confirmed" and existing["status"] != "confirmed" and not existing.get("sms_sent") and not existing.get("email_sent"):
+        loc_res = sb.table("locations").select("name").eq("id", booking["location_id"]).maybe_single().execute()
+        location_name = (loc_res.data or {}).get("name", "Artcaffe") if loc_res else "Artcaffe"
+        bg.add_task(_send_booking_notifications, booking, location_name)
+
+    return {"ok": True, "booking": booking}
+
+
+# ---------------------------------------------------------------------------
+# Admin: SMS settings
+# ---------------------------------------------------------------------------
+class SmsSettingsUpdate(BaseModel):
+    api_key: Optional[str] = None
+    access_key: Optional[str] = None
+    client_id: Optional[str] = None
+    sender_id: Optional[str] = None
+    staff_notification_phone: Optional[str] = None
+
+
+@router.get("/settings")
+def get_sms_settings():
+    saved = _sms_settings()
+    return {
+        "ok": True,
+        "data": {
+            "client_id": saved.get("client_id"),
+            "sender_id": saved.get("sender_id") or "OnfonInfo",
+            "staff_notification_phone": saved.get("staff_notification_phone"),
+            "api_key_masked": mask_value(_maybe_decrypt(saved.get("api_key_enc"))),
+            "api_key_configured": bool(saved.get("api_key_enc")),
+            "access_key_masked": mask_value(_maybe_decrypt(saved.get("access_key_enc"))),
+            "access_key_configured": bool(saved.get("access_key_enc")),
+            "last_test_status": saved.get("last_test_status"),
+            "last_test_at": saved.get("last_test_at"),
+            "last_test_error": saved.get("last_test_error"),
+        },
+    }
+
+
+@router.post("/settings")
+def update_sms_settings(body: SmsSettingsUpdate):
+    saved = _sms_settings()
+    if body.api_key:
+        saved["api_key_enc"] = encrypt_value(body.api_key)
+    if body.access_key:
+        saved["access_key_enc"] = encrypt_value(body.access_key)
+    if body.client_id is not None:
+        saved["client_id"] = body.client_id
+    if body.sender_id is not None:
+        saved["sender_id"] = body.sender_id
+    if body.staff_notification_phone is not None:
+        saved["staff_notification_phone"] = body.staff_notification_phone
+    app_settings.set_setting(sb, SETTINGS_KEY, saved)
+    return get_sms_settings()
+
+
+@router.post("/settings/test-sms")
+def send_test_sms():
+    """No safe read-only endpoint exists on Onfon's side — this sends a
+    real SMS to the configured staff phone, labeled "Send test SMS" in the
+    UI rather than "Test connection" to set the right expectation."""
+    saved = _sms_settings()
+    staff_phone = saved.get("staff_notification_phone")
+    now = _now()
+    if not staff_phone:
+        raise HTTPException(400, "Set a staff notification phone number first")
+    creds = _sms_credentials()
+    if not creds:
+        raise HTTPException(400, "SMS credentials not fully configured")
+
+    try:
+        onfon_sms_connector.send_sms(
+            to_number=staff_phone,
+            text="Artcaffe: this is a test SMS from Table Booking settings.",
+            api_key=creds["api_key"],
+            client_id=creds["client_id"],
+            access_key=creds["access_key"],
+            sender_id=creds["sender_id"],
+        )
+        saved["last_test_status"] = "success"
+        saved["last_test_at"] = now
+        saved["last_test_error"] = None
+        app_settings.set_setting(sb, SETTINGS_KEY, saved)
+        return {"ok": True, "message": f"Test SMS sent to {staff_phone}"}
+    except Exception as exc:  # noqa: BLE001
+        error = str(exc)[:300]
+        saved["last_test_status"] = "failed"
+        saved["last_test_at"] = now
+        saved["last_test_error"] = error
+        app_settings.set_setting(sb, SETTINGS_KEY, saved)
+        return {"ok": False, "error": error}

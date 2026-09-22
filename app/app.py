@@ -66,6 +66,7 @@ from tiktok_routes import router as tiktok_router
 from ads_management_routes import router as ads_management_router
 from whatsapp_contacts_routes import router as whatsapp_router
 from whatsapp_webhook_routes import router as whatsapp_webhook_router
+from table_booking_routes import router as table_bookings_router, public_router as table_bookings_public_router
 import master_scheduler
 import reminder_scheduler
 import meta_sync_scheduler
@@ -132,6 +133,8 @@ app.include_router(tiktok_router)
 app.include_router(ads_management_router)
 app.include_router(whatsapp_router)
 app.include_router(whatsapp_webhook_router)
+app.include_router(table_bookings_router)
+app.include_router(table_bookings_public_router)
 
 
 # ---------------------------------------------------------------------------
