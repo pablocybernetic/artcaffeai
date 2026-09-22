@@ -206,6 +206,36 @@ def _reminder_sms_text(booking: dict, location_name: str, directions_url: Option
     )
 
 
+def _branch_reminder_email_html(booking: dict, location_name: str) -> tuple[str, str]:
+    """Same reminder sent to the customer, but addressed to the branch —
+    a heads-up that this booking is coming up soon, same style as the
+    branch's original new-booking email in table_booking_routes.py."""
+    subject = f"{location_name} — Upcoming booking reminder: {booking['customer_name']} ({booking['party_size']} pax)"
+    html = f"""
+<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1a1a1a;">
+  <div style="background:#1a1a1a;padding:20px 24px;border-radius:8px 8px 0 0;">
+    <p style="color:#fff;font-size:18px;font-weight:700;margin:0;">Artcaffe — {location_name}</p>
+  </div>
+  <div style="background:#fff;padding:24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+    <p style="font-size:15px;color:#374151;">Reminder — this booking is coming up soon.</p>
+    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:16px;margin:16px 0;font-size:13px;color:#374151;">
+      <p style="margin:0 0 6px;"><strong>Guest:</strong> {booking['customer_name']} ({booking['phone']}, {booking['email']})</p>
+      <p style="margin:0 0 6px;"><strong>Date:</strong> {booking['booking_date']} at {booking['booking_time']}</p>
+      <p style="margin:0 0 6px;"><strong>Party size:</strong> {booking['party_size']}</p>
+      <p style="margin:0;"><strong>Seating:</strong> {booking['seating_preference'].title()}</p>
+    </div>
+    <a href="{notification_service.DASHBOARD_URL}/table-bookings"
+       style="display:inline-block;background:#1a1a1a;color:#fff;padding:10px 20px;
+              border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">
+      View in Table Bookings
+    </a>
+    <p style="font-size:12px;color:#9ca3af;margin-top:24px;">— Artcaffe AI Marketing System</p>
+  </div>
+</div>
+"""
+    return subject, html
+
+
 # ---------------------------------------------------------------------------
 # Internal
 # ---------------------------------------------------------------------------
@@ -284,6 +314,21 @@ def _send_reminder(sb: Client, booking: dict, location: dict) -> bool:
         update["reminder_sms_sent"] = False
         update["reminder_sms_error"] = "SMS credentials not configured"
 
+    branch_email = (location or {}).get("branch_email")
+    if branch_email:
+        try:
+            b_subject, b_html = _branch_reminder_email_html(booking, location_name)
+            b_sent = notification_service._send_email(branch_email, b_subject, b_html)
+            update["reminder_branch_email_sent"] = b_sent
+            update["reminder_branch_email_error"] = None if b_sent else "Email provider not configured or send failed"
+            any_sent = any_sent or b_sent
+        except Exception as exc:  # noqa: BLE001
+            update["reminder_branch_email_sent"] = False
+            update["reminder_branch_email_error"] = str(exc)[:300]
+    else:
+        update["reminder_branch_email_sent"] = False
+        update["reminder_branch_email_error"] = "No branch email configured for this location"
+
     update["reminder_sent_at"] = _now_utc().isoformat()
     try:
         sb.table("table_bookings").update(update).eq("id", booking["id"]).execute()
@@ -321,7 +366,7 @@ def send_reminder_now(sb: Client, booking_id: str) -> bool:
     if booking.get("location_id"):
         loc_res = (
             sb.table("locations")
-            .select("id,name,address,latitude,longitude,google_place_id")
+            .select("id,name,address,latitude,longitude,google_place_id,branch_email")
             .eq("id", booking["location_id"])
             .maybe_single()
             .execute()
@@ -355,7 +400,7 @@ def _run_once_sync(sb: Client) -> dict:
     if loc_ids:
         loc_res = (
             sb.table("locations")
-            .select("id,name,address,latitude,longitude,google_place_id")
+            .select("id,name,address,latitude,longitude,google_place_id,branch_email")
             .in_("id", loc_ids)
             .execute()
         )
