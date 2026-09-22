@@ -90,6 +90,7 @@ def _serialize_summary(row: dict) -> dict:
         "review_count": row.get("review_count"),
         "opening_hours": row.get("opening_hours") or {},
         "services": row.get("services") or [],
+        "menu_url": row.get("menu_url"),
         "google": {
             "maps_url": row.get("google_maps_url"),
             "review_url": row.get("google_review_url"),
