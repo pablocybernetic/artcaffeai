@@ -19,6 +19,7 @@ import math
 import os
 from datetime import datetime, timezone
 from typing import Any, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Response
 from supabase import Client, create_client
@@ -49,6 +50,23 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
+def _directions_url(row: dict) -> Optional[str]:
+    """Google Maps 'get directions' deep link — the Maps URLs API, which
+    needs no API key (unlike Embed/JS Maps). Opens turn-by-turn directions
+    from the visitor's current location to this branch, on both the Maps
+    app and the web. Prefers lat/lng + place_id for precision, falls back
+    to a text search when coordinates are missing."""
+    lat, lng = row.get("latitude"), row.get("longitude")
+    if lat is not None and lng is not None:
+        url = f"https://www.google.com/maps/dir/?api=1&destination={lat},{lng}"
+        place_id = row.get("google_place_id")
+        if place_id:
+            url += f"&destination_place_id={place_id}"
+        return url
+    label = row.get("name") or row.get("address")
+    return f"https://www.google.com/maps/dir/?api=1&destination={quote(label)}" if label else None
+
+
 def _serialize_summary(row: dict) -> dict:
     return {
         "id": row["id"],
@@ -75,6 +93,7 @@ def _serialize_summary(row: dict) -> dict:
         "google": {
             "maps_url": row.get("google_maps_url"),
             "review_url": row.get("google_review_url"),
+            "directions_url": _directions_url(row),
         },
         "shopify": {
             "url": row.get("shopify_url"),

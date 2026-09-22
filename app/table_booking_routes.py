@@ -33,6 +33,7 @@ from supabase import Client, create_client
 import app_settings
 import notification_service
 from connectors import onfon_sms_connector
+from locations_public_routes import _directions_url
 from secrets_crypto import decrypt_value, encrypt_value, mask_value
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
@@ -108,7 +109,7 @@ class BookingCreate(BaseModel):
     seating_preference: str
 
 
-def _customer_email_html(booking: dict, location_name: str, confirmed: bool) -> tuple[str, str]:
+def _customer_email_html(booking: dict, location_name: str, confirmed: bool, directions_url: Optional[str] = None) -> tuple[str, str]:
     if confirmed:
         subject = f"Artcaffe — Your table at {location_name} is confirmed"
         headline = "Your table is confirmed!"
@@ -141,6 +142,7 @@ def _customer_email_html(booking: dict, location_name: str, confirmed: bool) -> 
       <p style="margin:0 0 6px;"><strong>Party size:</strong> {booking['party_size']}</p>
       <p style="margin:0;"><strong>Seating:</strong> {booking['seating_preference'].title()}</p>
     </div>
+    {f'<a href="{directions_url}" style="display:inline-block;background:#1a1a1a;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">Get Directions</a>' if directions_url else ''}
     <p style="font-size:12px;color:#9ca3af;margin-top:24px;">— Artcaffe</p>
   </div>
 </div>
@@ -148,16 +150,18 @@ def _customer_email_html(booking: dict, location_name: str, confirmed: bool) -> 
     return subject, html
 
 
-def _customer_sms_text(booking: dict, location_name: str, confirmed: bool) -> str:
+def _customer_sms_text(booking: dict, location_name: str, confirmed: bool, directions_url: Optional[str] = None) -> str:
+    directions_suffix = f" Directions: {directions_url}" if directions_url else ""
     if confirmed:
         return (
             f"Artcaffe: Your table at {location_name} for {booking['party_size']} on "
             f"{booking['booking_date']} at {booking['booking_time']} is confirmed. See you then!"
+            f"{directions_suffix}"
         )
     return (
         f"Artcaffe: We've received your booking request at {location_name} for "
         f"{booking['party_size']} on {booking['booking_date']} at {booking['booking_time']}. "
-        f"We'll contact you within the hour to confirm."
+        f"We'll contact you within the hour to confirm.{directions_suffix}"
     )
 
 
@@ -221,7 +225,9 @@ def _notify_admins_of_booking(booking: dict, location_name: str) -> None:
         print(f"[table_booking_routes] admin notify failed: {exc}", flush=True)
 
 
-def _send_booking_notifications(booking: dict, location_name: str, notify_admins: bool = True) -> None:
+def _send_booking_notifications(
+    booking: dict, location_name: str, notify_admins: bool = True, directions_url: Optional[str] = None,
+) -> None:
     """Fires customer email, customer SMS, staff SMS, and (on first creation
     only) an admin team notification — independently, so one channel
     failing never blocks another, and the row always reflects exactly what
@@ -232,7 +238,7 @@ def _send_booking_notifications(booking: dict, location_name: str, notify_admins
     confirmed = booking["status"] == "confirmed"
     update: dict = {}
 
-    subject, html = _customer_email_html(booking, location_name, confirmed)
+    subject, html = _customer_email_html(booking, location_name, confirmed, directions_url)
     try:
         sent = notification_service._send_email(booking["email"], subject, html)
         update["email_sent"] = sent
@@ -246,7 +252,7 @@ def _send_booking_notifications(booking: dict, location_name: str, notify_admins
         try:
             onfon_sms_connector.send_sms(
                 to_number=booking["phone"],
-                text=_customer_sms_text(booking, location_name, confirmed),
+                text=_customer_sms_text(booking, location_name, confirmed, directions_url),
                 api_key=creds["api_key"],
                 client_id=creds["client_id"],
                 access_key=creds["access_key"],
@@ -300,7 +306,7 @@ def create_booking(body: BookingCreate, bg: BackgroundTasks):
 
     loc_res = (
         sb.table("locations")
-        .select("id,name")
+        .select("id,name,address,latitude,longitude,google_place_id")
         .eq("id", body.location_id)
         .eq("status", "active")
         .maybe_single()
@@ -308,7 +314,9 @@ def create_booking(body: BookingCreate, bg: BackgroundTasks):
     )
     if not loc_res or not loc_res.data:
         raise HTTPException(400, "Unknown or inactive location")
-    location_name = loc_res.data["name"]
+    location = loc_res.data
+    location_name = location["name"]
+    directions_url = _directions_url(location)
 
     status = "confirmed" if body.party_size <= LARGE_PARTY_THRESHOLD else "pending"
     row = {
@@ -325,7 +333,7 @@ def create_booking(body: BookingCreate, bg: BackgroundTasks):
     if not booking:
         raise HTTPException(500, "Booking was not created")
 
-    bg.add_task(_send_booking_notifications, booking, location_name)
+    bg.add_task(_send_booking_notifications, booking, location_name, directions_url=directions_url)
     return {"ok": True, "booking_id": booking["id"], "status": status}
 
 
@@ -354,13 +362,19 @@ def list_bookings(
     loc_ids = list({b["location_id"] for b in bookings if b.get("location_id")})
     locations_by_id: dict[str, dict] = {}
     if loc_ids:
-        loc_res = sb.table("locations").select("id,name,brand_type").in_("id", loc_ids).execute()
+        loc_res = (
+            sb.table("locations")
+            .select("id,name,brand_type,address,latitude,longitude,google_place_id")
+            .in_("id", loc_ids)
+            .execute()
+        )
         locations_by_id = {loc["id"]: loc for loc in (loc_res.data or [])}
 
     for b in bookings:
         loc = locations_by_id.get(b.get("location_id")) or {}
         b["location_name"] = loc.get("name")
         b["location_brand"] = loc.get("brand_type")
+        b["location_directions_url"] = _directions_url(loc) if loc else None
 
     return {"ok": True, "bookings": bookings}
 
@@ -388,10 +402,20 @@ def update_booking_status(booking_id: str, body: BookingStatusUpdate, bg: Backgr
     # Newly confirmed from pending, and notifications hadn't already gone out
     # — fire them now the same way the auto-confirm path does.
     if body.status == "confirmed" and existing["status"] != "confirmed" and not existing.get("sms_sent") and not existing.get("email_sent"):
-        loc_res = sb.table("locations").select("name").eq("id", booking["location_id"]).maybe_single().execute()
-        location_name = (loc_res.data or {}).get("name", "Artcaffe") if loc_res else "Artcaffe"
+        loc_res = (
+            sb.table("locations")
+            .select("name,address,latitude,longitude,google_place_id")
+            .eq("id", booking["location_id"])
+            .maybe_single()
+            .execute()
+        )
+        location = loc_res.data or {} if loc_res else {}
+        location_name = location.get("name", "Artcaffe")
         # notify_admins=False — the admin acting here already knows.
-        bg.add_task(_send_booking_notifications, booking, location_name, notify_admins=False)
+        bg.add_task(
+            _send_booking_notifications, booking, location_name,
+            notify_admins=False, directions_url=_directions_url(location),
+        )
 
     return {"ok": True, "booking": booking}
 
