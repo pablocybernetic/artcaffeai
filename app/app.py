@@ -75,6 +75,7 @@ import locations_scheduler
 import publish_scheduler
 import tiktok_sync_scheduler
 import ads_status_scheduler
+import table_booking_reminder_scheduler
 
 # ---------------------------------------------------------------------------
 # Config
@@ -98,7 +99,9 @@ async def lifespan(app: FastAPI):
     await publish_scheduler.start(sb)
     await tiktok_sync_scheduler.start(sb)
     await ads_status_scheduler.start(sb)
+    await table_booking_reminder_scheduler.start(sb)
     yield
+    await table_booking_reminder_scheduler.stop()
     await ads_status_scheduler.stop()
     await tiktok_sync_scheduler.stop()
     await publish_scheduler.stop()

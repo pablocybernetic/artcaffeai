@@ -509,3 +509,32 @@ def send_test_sms():
     saved["last_test_error"] = None
     app_settings.set_setting(sb, SETTINGS_KEY, saved)
     return {"ok": True, "message": f"Test SMS sent to {', '.join(staff_phones)}"}
+
+
+# ---------------------------------------------------------------------------
+# Admin: reminder scheduler settings
+# ---------------------------------------------------------------------------
+class ReminderSettingsUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    interval_minutes: Optional[int] = None
+    hours_before: Optional[int] = None
+
+
+@router.get("/reminders/settings")
+def get_reminder_settings():
+    from table_booking_reminder_scheduler import get_state  # noqa: PLC0415
+    return {"ok": True, "data": get_state()}
+
+
+@router.post("/reminders/settings")
+def update_reminder_settings(body: ReminderSettingsUpdate):
+    from table_booking_reminder_scheduler import (  # noqa: PLC0415
+        set_enabled, set_interval, set_hours_before, get_state,
+    )
+    if body.interval_minutes is not None:
+        set_interval(body.interval_minutes)
+    if body.hours_before is not None:
+        set_hours_before(body.hours_before)
+    if body.enabled is not None:
+        set_enabled(body.enabled)
+    return {"ok": True, "data": get_state()}
