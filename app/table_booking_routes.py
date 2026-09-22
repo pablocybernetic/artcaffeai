@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from pydantic import BaseModel
@@ -258,22 +258,28 @@ def _send_booking_notifications(booking: dict, location_name: str, notify_admins
             update["sms_sent"] = False
             update["sms_error"] = str(exc)[:300]
 
-        staff_phone = _sms_settings().get("staff_notification_phone")
-        if staff_phone:
-            try:
-                onfon_sms_connector.send_sms(
-                    to_number=staff_phone,
-                    text=_staff_sms_text(booking, location_name),
-                    api_key=creds["api_key"],
-                    client_id=creds["client_id"],
-                    access_key=creds["access_key"],
-                    sender_id=creds["sender_id"],
-                )
-                update["staff_notified"] = True
-                update["staff_notify_error"] = None
-            except Exception as exc:  # noqa: BLE001
-                update["staff_notified"] = False
-                update["staff_notify_error"] = str(exc)[:300]
+        staff_phones = _sms_settings().get("staff_notification_phones") or []
+        if staff_phones:
+            failures = []
+            successes = 0
+            for phone in staff_phones:
+                try:
+                    onfon_sms_connector.send_sms(
+                        to_number=phone,
+                        text=_staff_sms_text(booking, location_name),
+                        api_key=creds["api_key"],
+                        client_id=creds["client_id"],
+                        access_key=creds["access_key"],
+                        sender_id=creds["sender_id"],
+                    )
+                    successes += 1
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(f"{phone}: {str(exc)[:100]}")
+            # At least one number reached counts as notified — a booking
+            # shouldn't read as "staff not notified" when only one of
+            # several numbers failed.
+            update["staff_notified"] = successes > 0
+            update["staff_notify_error"] = "; ".join(failures)[:300] if failures else None
         else:
             update["staff_notify_error"] = "No staff notification phone configured"
     else:
@@ -398,7 +404,7 @@ class SmsSettingsUpdate(BaseModel):
     access_key: Optional[str] = None
     client_id: Optional[str] = None
     sender_id: Optional[str] = None
-    staff_notification_phone: Optional[str] = None
+    staff_notification_phones: Optional[List[str]] = None
 
 
 @router.get("/settings")
@@ -409,7 +415,7 @@ def get_sms_settings():
         "data": {
             "client_id": saved.get("client_id"),
             "sender_id": saved.get("sender_id") or "OnfonInfo",
-            "staff_notification_phone": saved.get("staff_notification_phone"),
+            "staff_notification_phones": saved.get("staff_notification_phones") or [],
             "api_key_masked": mask_value(_maybe_decrypt(saved.get("api_key_enc"))),
             "api_key_configured": bool(saved.get("api_key_enc")),
             "access_key_masked": mask_value(_maybe_decrypt(saved.get("access_key_enc"))),
@@ -432,8 +438,8 @@ def update_sms_settings(body: SmsSettingsUpdate):
         saved["client_id"] = body.client_id
     if body.sender_id is not None:
         saved["sender_id"] = body.sender_id
-    if body.staff_notification_phone is not None:
-        saved["staff_notification_phone"] = body.staff_notification_phone
+    if body.staff_notification_phones is not None:
+        saved["staff_notification_phones"] = [p.strip() for p in body.staff_notification_phones if p.strip()]
     app_settings.set_setting(sb, SETTINGS_KEY, saved)
     return get_sms_settings()
 
@@ -441,35 +447,41 @@ def update_sms_settings(body: SmsSettingsUpdate):
 @router.post("/settings/test-sms")
 def send_test_sms():
     """No safe read-only endpoint exists on Onfon's side — this sends a
-    real SMS to the configured staff phone, labeled "Send test SMS" in the
-    UI rather than "Test connection" to set the right expectation."""
+    real SMS to every configured staff phone, labeled "Send test SMS" in
+    the UI rather than "Test connection" to set the right expectation."""
     saved = _sms_settings()
-    staff_phone = saved.get("staff_notification_phone")
+    staff_phones = saved.get("staff_notification_phones") or []
     now = _now()
-    if not staff_phone:
-        raise HTTPException(400, "Set a staff notification phone number first")
+    if not staff_phones:
+        raise HTTPException(400, "Set at least one staff notification phone number first")
     creds = _sms_credentials()
     if not creds:
         raise HTTPException(400, "SMS credentials not fully configured")
 
-    try:
-        onfon_sms_connector.send_sms(
-            to_number=staff_phone,
-            text="Artcaffe: this is a test SMS from Table Booking settings.",
-            api_key=creds["api_key"],
-            client_id=creds["client_id"],
-            access_key=creds["access_key"],
-            sender_id=creds["sender_id"],
-        )
-        saved["last_test_status"] = "success"
-        saved["last_test_at"] = now
-        saved["last_test_error"] = None
-        app_settings.set_setting(sb, SETTINGS_KEY, saved)
-        return {"ok": True, "message": f"Test SMS sent to {staff_phone}"}
-    except Exception as exc:  # noqa: BLE001
-        error = str(exc)[:300]
+    failures = []
+    for phone in staff_phones:
+        try:
+            onfon_sms_connector.send_sms(
+                to_number=phone,
+                text="Artcaffe: this is a test SMS from Table Booking settings.",
+                api_key=creds["api_key"],
+                client_id=creds["client_id"],
+                access_key=creds["access_key"],
+                sender_id=creds["sender_id"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"{phone}: {str(exc)[:150]}")
+
+    if failures:
+        error = "; ".join(failures)[:300]
         saved["last_test_status"] = "failed"
         saved["last_test_at"] = now
         saved["last_test_error"] = error
         app_settings.set_setting(sb, SETTINGS_KEY, saved)
         return {"ok": False, "error": error}
+
+    saved["last_test_status"] = "success"
+    saved["last_test_at"] = now
+    saved["last_test_error"] = None
+    app_settings.set_setting(sb, SETTINGS_KEY, saved)
+    return {"ok": True, "message": f"Test SMS sent to {', '.join(staff_phones)}"}
