@@ -141,7 +141,9 @@ def _ics_attachment(booking: dict, location: dict) -> Optional[list]:
     }]
 
 
-def _action_buttons_html(directions_url: Optional[str], calendar_url: Optional[str]) -> str:
+def _action_buttons_html(
+    directions_url: Optional[str], calendar_url: Optional[str], menu_url: Optional[str] = None,
+) -> str:
     buttons = []
     if directions_url:
         buttons.append(
@@ -156,6 +158,13 @@ def _action_buttons_html(directions_url: Optional[str], calendar_url: Optional[s
             f'font-size:13px;font-weight:600;margin-left:8px;">'
             f'Add to Google Calendar</a>'
         )
+    if menu_url:
+        buttons.append(
+            f'<a href="{menu_url}" style="display:inline-block;background:#fff;color:#1a1a1a;'
+            f'border:1px solid #d1d5db;padding:9px 20px;border-radius:6px;text-decoration:none;'
+            f'font-size:13px;font-weight:600;margin-left:8px;">'
+            f'View Menu</a>'
+        )
     if not buttons:
         return ""
     return f'<div style="margin-top:4px;">{"".join(buttons)}</div>'
@@ -163,7 +172,7 @@ def _action_buttons_html(directions_url: Optional[str], calendar_url: Optional[s
 
 def _customer_email_html(
     booking: dict, location_name: str, confirmed: bool,
-    directions_url: Optional[str] = None, calendar_url: Optional[str] = None,
+    directions_url: Optional[str] = None, calendar_url: Optional[str] = None, menu_url: Optional[str] = None,
 ) -> tuple[str, str]:
     if confirmed:
         subject = f"Artcaffe — Your table at {location_name} is confirmed"
@@ -197,7 +206,7 @@ def _customer_email_html(
       <p style="margin:0 0 6px;"><strong>Party size:</strong> {booking['party_size']}</p>
       <p style="margin:0;"><strong>Seating:</strong> {booking['seating_preference'].title()}</p>
     </div>
-    {_action_buttons_html(directions_url, calendar_url)}
+    {_action_buttons_html(directions_url, calendar_url, menu_url)}
     <p style="font-size:12px;color:#9ca3af;margin-top:24px;">— Artcaffe</p>
   </div>
 </div>
@@ -414,6 +423,7 @@ def _send_booking_notifications(
     location_name = location.get("name") or "Artcaffe"
     directions_url = _directions_url(location) if location else None
     calendar_url = _calendar_url(booking, location)
+    menu_url = location.get("menu_url")
     ics_attachment = _ics_attachment(booking, location)
 
     if notify_admins:
@@ -422,7 +432,7 @@ def _send_booking_notifications(
     confirmed = booking["status"] == "confirmed"
     update: dict = {}
 
-    subject, html = _customer_email_html(booking, location_name, confirmed, directions_url, calendar_url)
+    subject, html = _customer_email_html(booking, location_name, confirmed, directions_url, calendar_url, menu_url)
     try:
         sent = notification_service._send_email(booking["email"], subject, html, attachments=ics_attachment)
         update["email_sent"] = sent
@@ -504,7 +514,7 @@ def create_booking(body: BookingCreate, bg: BackgroundTasks):
 
     loc_res = (
         sb.table("locations")
-        .select("id,name,address,latitude,longitude,google_place_id,branch_email")
+        .select("id,name,address,latitude,longitude,google_place_id,branch_email,menu_url")
         .eq("id", body.location_id)
         .eq("status", "active")
         .maybe_single()
@@ -632,7 +642,7 @@ def update_booking(booking_id: str, body: BookingUpdate, bg: BackgroundTasks):
     if body.status == "confirmed" and existing["status"] != "confirmed" and not existing.get("sms_sent") and not existing.get("email_sent"):
         loc_res = (
             sb.table("locations")
-            .select("name,address,latitude,longitude,google_place_id,branch_email")
+            .select("name,address,latitude,longitude,google_place_id,branch_email,menu_url")
             .eq("id", booking["location_id"])
             .maybe_single()
             .execute()
@@ -669,7 +679,7 @@ def resend_confirmation(booking_id: str, bg: BackgroundTasks):
 
     loc_res = (
         sb.table("locations")
-        .select("name,address,latitude,longitude,google_place_id,branch_email")
+        .select("name,address,latitude,longitude,google_place_id,branch_email,menu_url")
         .eq("id", booking["location_id"])
         .maybe_single()
         .execute()

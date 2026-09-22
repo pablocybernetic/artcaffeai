@@ -169,7 +169,9 @@ def _sms_credentials(sb: Client) -> Optional[dict]:
 # Reminder content
 # ---------------------------------------------------------------------------
 
-def _reminder_action_buttons_html(directions_url: Optional[str], calendar_url: Optional[str]) -> str:
+def _reminder_action_buttons_html(
+    directions_url: Optional[str], calendar_url: Optional[str], menu_url: Optional[str] = None,
+) -> str:
     buttons = []
     if directions_url:
         buttons.append(
@@ -184,13 +186,21 @@ def _reminder_action_buttons_html(directions_url: Optional[str], calendar_url: O
             f'font-size:13px;font-weight:600;margin-left:8px;">'
             f'Add to Google Calendar</a>'
         )
+    if menu_url:
+        buttons.append(
+            f'<a href="{menu_url}" style="display:inline-block;background:#fff;color:#1a1a1a;'
+            f'border:1px solid #d1d5db;padding:9px 20px;border-radius:6px;text-decoration:none;'
+            f'font-size:13px;font-weight:600;margin-left:8px;">'
+            f'View Menu</a>'
+        )
     if not buttons:
         return ""
     return f'<div style="margin-top:4px;">{"".join(buttons)}</div>'
 
 
 def _reminder_email_html(
-    booking: dict, location_name: str, directions_url: Optional[str], calendar_url: Optional[str] = None,
+    booking: dict, location_name: str, directions_url: Optional[str],
+    calendar_url: Optional[str] = None, menu_url: Optional[str] = None,
 ) -> tuple[str, str]:
     subject = f"Artcaffe — See you soon at {location_name}"
     html = f"""
@@ -207,7 +217,7 @@ def _reminder_email_html(
       <p style="margin:0 0 6px;"><strong>Time:</strong> {booking['booking_time']}</p>
       <p style="margin:0;"><strong>Party size:</strong> {booking['party_size']}</p>
     </div>
-    {_reminder_action_buttons_html(directions_url, calendar_url)}
+    {_reminder_action_buttons_html(directions_url, calendar_url, menu_url)}
     <p style="font-size:12px;color:#9ca3af;margin-top:24px;">— Artcaffe</p>
   </div>
 </div>
@@ -327,11 +337,12 @@ def _send_reminder(sb: Client, booking: dict, location: dict) -> bool:
     location_name = location.get("name") or "Artcaffe"
     directions_url = _directions_url(location) if location else None
     calendar_url = _reminder_calendar_url(booking, location)
+    menu_url = (location or {}).get("menu_url")
     ics_attachment = _reminder_ics_attachment(booking, location)
     update: dict = {}
     any_sent = False
 
-    subject, html = _reminder_email_html(booking, location_name, directions_url, calendar_url)
+    subject, html = _reminder_email_html(booking, location_name, directions_url, calendar_url, menu_url)
     try:
         sent = notification_service._send_email(booking["email"], subject, html, attachments=ics_attachment)
         update["reminder_email_sent"] = sent
@@ -414,7 +425,7 @@ def send_reminder_now(sb: Client, booking_id: str) -> bool:
     if booking.get("location_id"):
         loc_res = (
             sb.table("locations")
-            .select("id,name,address,latitude,longitude,google_place_id,branch_email")
+            .select("id,name,address,latitude,longitude,google_place_id,branch_email,menu_url")
             .eq("id", booking["location_id"])
             .maybe_single()
             .execute()
@@ -448,7 +459,7 @@ def _run_once_sync(sb: Client) -> dict:
     if loc_ids:
         loc_res = (
             sb.table("locations")
-            .select("id,name,address,latitude,longitude,google_place_id,branch_email")
+            .select("id,name,address,latitude,longitude,google_place_id,branch_email,menu_url")
             .in_("id", loc_ids)
             .execute()
         )
