@@ -228,6 +228,76 @@ def _staff_sms_text(booking: dict, location_name: str) -> str:
     )
 
 
+def _cancellation_email_html(booking: dict, location_name: str) -> tuple[str, str]:
+    subject = f"Artcaffe — Your booking at {location_name} has been cancelled"
+    html = f"""
+<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1a1a1a;">
+  <div style="background:#1a1a1a;padding:20px 24px;border-radius:8px 8px 0 0;">
+    <p style="color:#fff;font-size:18px;font-weight:700;margin:0;">Artcaffe</p>
+  </div>
+  <div style="background:#fff;padding:24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+    <p style="font-size:16px;font-weight:700;color:#1a1a1a;">Your booking has been cancelled</p>
+    <p style="font-size:14px;color:#374151;">Hi {booking['customer_name']}, your table booking below has been cancelled.</p>
+    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:16px;margin:16px 0;font-size:13px;color:#374151;">
+      <p style="margin:0 0 6px;"><strong>Location:</strong> {location_name}</p>
+      <p style="margin:0 0 6px;"><strong>Date:</strong> {booking['booking_date']}</p>
+      <p style="margin:0;"><strong>Time:</strong> {booking['booking_time']}</p>
+    </div>
+    <p style="font-size:14px;color:#374151;">If this wasn't expected, or you'd like to book again, just get in touch or submit a new request.</p>
+    <p style="font-size:12px;color:#9ca3af;margin-top:24px;">— Artcaffe</p>
+  </div>
+</div>
+"""
+    return subject, html
+
+
+def _cancellation_sms_text(booking: dict, location_name: str) -> str:
+    return (
+        f"Artcaffe: Your booking at {location_name} for {booking['booking_date']} at "
+        f"{booking['booking_time']} has been cancelled. Contact us if you have questions."
+    )
+
+
+def _send_cancellation_notification(booking: dict, location: dict) -> None:
+    """Customer-facing cancellation email + SMS — fired only when an admin
+    explicitly opts in via the cancel confirmation dialog, each channel
+    independently try/excepted like every other notification here."""
+    location_name = (location or {}).get("name") or "Artcaffe"
+    update: dict = {}
+
+    subject, html = _cancellation_email_html(booking, location_name)
+    try:
+        sent = notification_service._send_email(booking["email"], subject, html)
+        update["cancellation_email_sent"] = sent
+        update["cancellation_email_error"] = None if sent else "Email provider not configured or send failed"
+    except Exception as exc:  # noqa: BLE001
+        update["cancellation_email_sent"] = False
+        update["cancellation_email_error"] = str(exc)[:300]
+
+    creds = _sms_credentials()
+    if creds:
+        try:
+            onfon_sms_connector.send_sms(
+                to_number=booking["phone"],
+                text=_cancellation_sms_text(booking, location_name),
+                api_key=creds["api_key"],
+                client_id=creds["client_id"],
+                access_key=creds["access_key"],
+                sender_id=creds["sender_id"],
+            )
+            update["cancellation_sms_sent"] = True
+            update["cancellation_sms_error"] = None
+        except Exception as exc:  # noqa: BLE001
+            update["cancellation_sms_sent"] = False
+            update["cancellation_sms_error"] = str(exc)[:300]
+    else:
+        update["cancellation_sms_sent"] = False
+        update["cancellation_sms_error"] = "SMS credentials not configured"
+
+    update["updated_at"] = _now()
+    sb.table("table_bookings").update(update).eq("id", booking["id"]).execute()
+
+
 def _admin_notification_html(booking: dict, location_name: str) -> tuple[str, str]:
     needs_action = booking["status"] == "pending"
     subject = (
@@ -522,6 +592,10 @@ class BookingUpdate(BaseModel):
     booking_time: Optional[str] = None
     seating_preference: Optional[str] = None
     special_occasion: Optional[str] = None
+    # Not a table_bookings column — popped out of the DB update below.
+    # Set when the admin's cancel confirmation dialog opts in to also
+    # notifying the customer.
+    notify_customer: Optional[bool] = None
 
 
 @router.patch("/{booking_id}")
@@ -539,6 +613,7 @@ def update_booking(booking_id: str, body: BookingUpdate, bg: BackgroundTasks):
     existing = res.data
 
     update = body.dict(exclude_unset=True)
+    notify_customer_on_cancel = update.pop("notify_customer", None)
     if not update:
         raise HTTPException(400, "No fields to update")
     update["updated_at"] = _now()
@@ -565,6 +640,19 @@ def update_booking(booking_id: str, body: BookingUpdate, bg: BackgroundTasks):
         location = loc_res.data or {} if loc_res else {}
         # notify_admins=False — the admin acting here already knows.
         bg.add_task(_send_booking_notifications, booking, location, notify_admins=False)
+
+    # Newly cancelled, and the admin opted in via the cancel confirmation
+    # dialog to also notifying the customer.
+    if body.status == "cancelled" and existing["status"] != "cancelled" and notify_customer_on_cancel:
+        loc_res = (
+            sb.table("locations")
+            .select("name")
+            .eq("id", booking["location_id"])
+            .maybe_single()
+            .execute()
+        )
+        location = loc_res.data or {} if loc_res else {}
+        bg.add_task(_send_cancellation_notification, booking, location)
 
     return {"ok": True, "booking": booking}
 
