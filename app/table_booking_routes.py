@@ -169,10 +169,66 @@ def _staff_sms_text(booking: dict, location_name: str) -> str:
     )
 
 
-def _send_booking_notifications(booking: dict, location_name: str) -> None:
-    """Fires customer email, customer SMS, and staff SMS independently —
-    one channel failing never blocks another, and the row always reflects
-    exactly what did/didn't go out."""
+def _admin_notification_html(booking: dict, location_name: str) -> tuple[str, str]:
+    needs_action = booking["status"] == "pending"
+    subject = (
+        f"Artcaffe — Booking needs confirmation: {booking['customer_name']} ({booking['party_size']} pax)"
+        if needs_action else
+        f"Artcaffe — New table booking: {booking['customer_name']} ({booking['party_size']} pax)"
+    )
+    html = f"""
+<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1a1a1a;">
+  <div style="background:#1a1a1a;padding:20px 24px;border-radius:8px 8px 0 0;">
+    <p style="color:#fff;font-size:18px;font-weight:700;margin:0;">Artcaffe AI Marketing</p>
+  </div>
+  <div style="background:#fff;padding:24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+    <p style="font-size:15px;color:#374151;">
+      {"A party of over " + str(LARGE_PARTY_THRESHOLD) + " needs your confirmation." if needs_action else "A new table booking was confirmed automatically."}
+    </p>
+    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:16px;margin:16px 0;font-size:13px;color:#374151;">
+      <p style="margin:0 0 6px;"><strong>Guest:</strong> {booking['customer_name']} ({booking['phone']})</p>
+      <p style="margin:0 0 6px;"><strong>Location:</strong> {location_name}</p>
+      <p style="margin:0 0 6px;"><strong>Date:</strong> {booking['booking_date']} at {booking['booking_time']}</p>
+      <p style="margin:0 0 6px;"><strong>Party size:</strong> {booking['party_size']}</p>
+      <p style="margin:0;"><strong>Seating:</strong> {booking['seating_preference'].title()}</p>
+    </div>
+    <a href="{notification_service.DASHBOARD_URL}/table-bookings"
+       style="display:inline-block;background:#1a1a1a;color:#fff;padding:10px 20px;
+              border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">
+      {"Review in Table Bookings" if needs_action else "View in Table Bookings"}
+    </a>
+    <p style="font-size:12px;color:#9ca3af;margin-top:24px;">— Artcaffe AI Marketing System</p>
+  </div>
+</div>
+"""
+    return subject, html
+
+
+def _notify_admins_of_booking(booking: dict, location_name: str) -> None:
+    """Fans out to every active admin/content_manager who hasn't opted out
+    (team inbox row + audit log + email), same convention as approval_needed
+    and post_scheduled/published. Best-effort — never raises."""
+    try:
+        subject, html = _admin_notification_html(booking, location_name)
+        notification_service._notify_relevant_team(
+            sb,
+            notif_type="table_booking_created",
+            subject=subject,
+            html=html,
+            payload={"booking_id": booking["id"], "location_id": booking["location_id"], "status": booking["status"]},
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[table_booking_routes] admin notify failed: {exc}", flush=True)
+
+
+def _send_booking_notifications(booking: dict, location_name: str, notify_admins: bool = True) -> None:
+    """Fires customer email, customer SMS, staff SMS, and (on first creation
+    only) an admin team notification — independently, so one channel
+    failing never blocks another, and the row always reflects exactly what
+    did/didn't go out."""
+    if notify_admins:
+        _notify_admins_of_booking(booking, location_name)
+
     confirmed = booking["status"] == "confirmed"
     update: dict = {}
 
@@ -328,7 +384,8 @@ def update_booking_status(booking_id: str, body: BookingStatusUpdate, bg: Backgr
     if body.status == "confirmed" and existing["status"] != "confirmed" and not existing.get("sms_sent") and not existing.get("email_sent"):
         loc_res = sb.table("locations").select("name").eq("id", booking["location_id"]).maybe_single().execute()
         location_name = (loc_res.data or {}).get("name", "Artcaffe") if loc_res else "Artcaffe"
-        bg.add_task(_send_booking_notifications, booking, location_name)
+        # notify_admins=False — the admin acting here already knows.
+        bg.add_task(_send_booking_notifications, booking, location_name, notify_admins=False)
 
     return {"ok": True, "booking": booking}
 
