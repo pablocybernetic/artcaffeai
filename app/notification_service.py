@@ -33,8 +33,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _send_email(to_email: str, subject: str, html: str) -> bool:
-    """Fire-and-forget Resend email. Returns True on success."""
+def _send_email(to_email: str, subject: str, html: str, attachments: Optional[list] = None) -> bool:
+    """Fire-and-forget Resend email. Returns True on success.
+
+    attachments, when given, is Resend's own attachment shape — a list
+    of {filename, content, content_type?} dicts, content being a byte
+    list (list(some_bytes)) or a base64 string. Used by table booking's
+    .ics calendar invite; every other call site omits it."""
     api_key = os.environ.get("RESEND_API_KEY") or RESEND_API_KEY
     from_addr = os.environ.get("NOTIFY_FROM_EMAIL", "noreply@artcaffemarket.co.ke")
     if not api_key:
@@ -43,12 +48,15 @@ def _send_email(to_email: str, subject: str, html: str) -> bool:
     try:
         import resend  # type: ignore
         resend.api_key = api_key
-        resend.Emails.send({
+        payload: dict[str, Any] = {
             "from": from_addr,
             "to": to_email,
             "subject": subject,
             "html": html,
-        })
+        }
+        if attachments:
+            payload["attachments"] = attachments
+        resend.Emails.send(payload)
         return True
     except Exception as exc:  # noqa: BLE001
         print(f"[notification_service] email failed to={to_email}: {exc}", flush=True)

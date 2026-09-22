@@ -39,6 +39,7 @@ from typing import Optional
 from supabase import Client
 
 import app_settings
+import ics_helper
 import notification_service
 from connectors import onfon_sms_connector
 from locations_public_routes import _directions_url
@@ -168,14 +169,30 @@ def _sms_credentials(sb: Client) -> Optional[dict]:
 # Reminder content
 # ---------------------------------------------------------------------------
 
-def _reminder_email_html(booking: dict, location_name: str, directions_url: Optional[str]) -> tuple[str, str]:
+def _reminder_action_buttons_html(directions_url: Optional[str], calendar_url: Optional[str]) -> str:
+    buttons = []
+    if directions_url:
+        buttons.append(
+            f'<a href="{directions_url}" style="display:inline-block;background:#1a1a1a;color:#fff;'
+            f'padding:10px 20px;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">'
+            f'Get Directions</a>'
+        )
+    if calendar_url:
+        buttons.append(
+            f'<a href="{calendar_url}" style="display:inline-block;background:#fff;color:#1a1a1a;'
+            f'border:1px solid #d1d5db;padding:9px 20px;border-radius:6px;text-decoration:none;'
+            f'font-size:13px;font-weight:600;margin-left:8px;">'
+            f'Add to Google Calendar</a>'
+        )
+    if not buttons:
+        return ""
+    return f'<div style="margin-top:4px;">{"".join(buttons)}</div>'
+
+
+def _reminder_email_html(
+    booking: dict, location_name: str, directions_url: Optional[str], calendar_url: Optional[str] = None,
+) -> tuple[str, str]:
     subject = f"Artcaffe — See you soon at {location_name}"
-    directions_html = (
-        f'<a href="{directions_url}" style="display:inline-block;background:#1a1a1a;color:#fff;'
-        f'padding:10px 20px;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">'
-        f'Get Directions</a>'
-        if directions_url else ""
-    )
     html = f"""
 <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1a1a1a;">
   <div style="background:#1a1a1a;padding:20px 24px;border-radius:8px 8px 0 0;">
@@ -190,7 +207,7 @@ def _reminder_email_html(booking: dict, location_name: str, directions_url: Opti
       <p style="margin:0 0 6px;"><strong>Time:</strong> {booking['booking_time']}</p>
       <p style="margin:0;"><strong>Party size:</strong> {booking['party_size']}</p>
     </div>
-    {directions_html}
+    {_reminder_action_buttons_html(directions_url, calendar_url)}
     <p style="font-size:12px;color:#9ca3af;margin-top:24px;">— Artcaffe</p>
   </div>
 </div>
@@ -273,6 +290,35 @@ def _get_candidate_bookings(sb: Client) -> list[dict]:
     return res.data or []
 
 
+def _reminder_calendar_url(booking: dict, location: dict) -> Optional[str]:
+    return ics_helper.google_calendar_url(
+        summary=f"Table booking at {location.get('name') or 'Artcaffe'}",
+        booking_date=booking["booking_date"],
+        booking_time=booking["booking_time"],
+        location_name=location.get("name") or "Artcaffe",
+        location_address=location.get("address"),
+        description=f"Party of {booking['party_size']} — {booking['seating_preference'].title()} seating.",
+    )
+
+
+def _reminder_ics_attachment(booking: dict, location: dict) -> Optional[list]:
+    ics = ics_helper.build_ics(
+        summary=f"Table booking at {location.get('name') or 'Artcaffe'}",
+        booking_date=booking["booking_date"],
+        booking_time=booking["booking_time"],
+        location_name=location.get("name") or "Artcaffe",
+        location_address=location.get("address"),
+        description=f"Party of {booking['party_size']} — {booking['seating_preference'].title()} seating.",
+    )
+    if not ics:
+        return None
+    return [{
+        "filename": "table-booking.ics",
+        "content": list(ics.encode("utf-8")),
+        "content_type": "text/calendar",
+    }]
+
+
 def _send_reminder(sb: Client, booking: dict, location: dict) -> bool:
     """Fires the reminder email and SMS independently — one channel
     failing never blocks the other — then marks reminder_sent_at
@@ -280,12 +326,14 @@ def _send_reminder(sb: Client, booking: dict, location: dict) -> bool:
     True if at least one channel actually delivered."""
     location_name = location.get("name") or "Artcaffe"
     directions_url = _directions_url(location) if location else None
+    calendar_url = _reminder_calendar_url(booking, location)
+    ics_attachment = _reminder_ics_attachment(booking, location)
     update: dict = {}
     any_sent = False
 
-    subject, html = _reminder_email_html(booking, location_name, directions_url)
+    subject, html = _reminder_email_html(booking, location_name, directions_url, calendar_url)
     try:
-        sent = notification_service._send_email(booking["email"], subject, html)
+        sent = notification_service._send_email(booking["email"], subject, html, attachments=ics_attachment)
         update["reminder_email_sent"] = sent
         update["reminder_email_error"] = None if sent else "Email provider not configured or send failed"
         any_sent = any_sent or sent

@@ -31,6 +31,7 @@ from pydantic import BaseModel
 from supabase import Client, create_client
 
 import app_settings
+import ics_helper
 import notification_service
 from connectors import onfon_sms_connector
 from locations_public_routes import _directions_url
@@ -109,7 +110,61 @@ class BookingCreate(BaseModel):
     seating_preference: str
 
 
-def _customer_email_html(booking: dict, location_name: str, confirmed: bool, directions_url: Optional[str] = None) -> tuple[str, str]:
+def _calendar_url(booking: dict, location: dict) -> Optional[str]:
+    return ics_helper.google_calendar_url(
+        summary=f"Table booking at {location.get('name') or 'Artcaffe'}",
+        booking_date=booking["booking_date"],
+        booking_time=booking["booking_time"],
+        location_name=location.get("name") or "Artcaffe",
+        location_address=location.get("address"),
+        description=f"Party of {booking['party_size']} — {booking['seating_preference'].title()} seating.",
+    )
+
+
+def _ics_attachment(booking: dict, location: dict) -> Optional[list]:
+    """Resend attachment list for the .ics calendar invite, or None if
+    the booking's date/time couldn't be parsed into an event."""
+    ics = ics_helper.build_ics(
+        summary=f"Table booking at {location.get('name') or 'Artcaffe'}",
+        booking_date=booking["booking_date"],
+        booking_time=booking["booking_time"],
+        location_name=location.get("name") or "Artcaffe",
+        location_address=location.get("address"),
+        description=f"Party of {booking['party_size']} — {booking['seating_preference'].title()} seating.",
+    )
+    if not ics:
+        return None
+    return [{
+        "filename": "table-booking.ics",
+        "content": list(ics.encode("utf-8")),
+        "content_type": "text/calendar",
+    }]
+
+
+def _action_buttons_html(directions_url: Optional[str], calendar_url: Optional[str]) -> str:
+    buttons = []
+    if directions_url:
+        buttons.append(
+            f'<a href="{directions_url}" style="display:inline-block;background:#1a1a1a;color:#fff;'
+            f'padding:10px 20px;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">'
+            f'Get Directions</a>'
+        )
+    if calendar_url:
+        buttons.append(
+            f'<a href="{calendar_url}" style="display:inline-block;background:#fff;color:#1a1a1a;'
+            f'border:1px solid #d1d5db;padding:9px 20px;border-radius:6px;text-decoration:none;'
+            f'font-size:13px;font-weight:600;margin-left:8px;">'
+            f'Add to Google Calendar</a>'
+        )
+    if not buttons:
+        return ""
+    return f'<div style="margin-top:4px;">{"".join(buttons)}</div>'
+
+
+def _customer_email_html(
+    booking: dict, location_name: str, confirmed: bool,
+    directions_url: Optional[str] = None, calendar_url: Optional[str] = None,
+) -> tuple[str, str]:
     if confirmed:
         subject = f"Artcaffe — Your table at {location_name} is confirmed"
         headline = "Your table is confirmed!"
@@ -142,7 +197,7 @@ def _customer_email_html(booking: dict, location_name: str, confirmed: bool, dir
       <p style="margin:0 0 6px;"><strong>Party size:</strong> {booking['party_size']}</p>
       <p style="margin:0;"><strong>Seating:</strong> {booking['seating_preference'].title()}</p>
     </div>
-    {f'<a href="{directions_url}" style="display:inline-block;background:#1a1a1a;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">Get Directions</a>' if directions_url else ''}
+    {_action_buttons_html(directions_url, calendar_url)}
     <p style="font-size:12px;color:#9ca3af;margin-top:24px;">— Artcaffe</p>
   </div>
 </div>
@@ -288,6 +343,8 @@ def _send_booking_notifications(
     location = location or {}
     location_name = location.get("name") or "Artcaffe"
     directions_url = _directions_url(location) if location else None
+    calendar_url = _calendar_url(booking, location)
+    ics_attachment = _ics_attachment(booking, location)
 
     if notify_admins:
         _notify_admins_of_booking(booking, location_name)
@@ -295,9 +352,9 @@ def _send_booking_notifications(
     confirmed = booking["status"] == "confirmed"
     update: dict = {}
 
-    subject, html = _customer_email_html(booking, location_name, confirmed, directions_url)
+    subject, html = _customer_email_html(booking, location_name, confirmed, directions_url, calendar_url)
     try:
-        sent = notification_service._send_email(booking["email"], subject, html)
+        sent = notification_service._send_email(booking["email"], subject, html, attachments=ics_attachment)
         update["email_sent"] = sent
         update["email_error"] = None if sent else "Email provider not configured or send failed"
     except Exception as exc:  # noqa: BLE001
@@ -403,7 +460,12 @@ def create_booking(body: BookingCreate, bg: BackgroundTasks):
         raise HTTPException(500, "Booking was not created")
 
     bg.add_task(_send_booking_notifications, booking, location)
-    return {"ok": True, "booking_id": booking["id"], "status": status}
+    return {
+        "ok": True,
+        "booking_id": booking["id"],
+        "status": status,
+        "calendar_url": _calendar_url(booking, location),
+    }
 
 
 # ---------------------------------------------------------------------------
