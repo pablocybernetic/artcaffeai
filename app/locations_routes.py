@@ -122,6 +122,7 @@ class LocationIn(BaseModel):
     uber_eats_url: Optional[str] = None
     glovo_url: Optional[str] = None
     media_mentions: Optional[list] = None
+    branch_email: Optional[str] = None
 
 
 class LocationUpdate(BaseModel):
@@ -171,6 +172,7 @@ class LocationUpdate(BaseModel):
     uber_eats_url: Optional[str] = None
     glovo_url: Optional[str] = None
     media_mentions: Optional[list] = None
+    branch_email: Optional[str] = None
 
 
 @router.get("")

@@ -208,6 +208,59 @@ def _admin_notification_html(booking: dict, location_name: str) -> tuple[str, st
     return subject, html
 
 
+def _branch_email_html(booking: dict, location_name: str) -> tuple[str, str]:
+    needs_action = booking["status"] == "pending"
+    subject = f"{location_name} — New booking: {booking['customer_name']} ({booking['party_size']} pax)"
+    html = f"""
+<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1a1a1a;">
+  <div style="background:#1a1a1a;padding:20px 24px;border-radius:8px 8px 0 0;">
+    <p style="color:#fff;font-size:18px;font-weight:700;margin:0;">Artcaffe — {location_name}</p>
+  </div>
+  <div style="background:#fff;padding:24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+    <p style="font-size:15px;color:#374151;">
+      {"A party of over " + str(LARGE_PARTY_THRESHOLD) + " has requested a table and needs confirmation." if needs_action else "A new table booking has come in for your branch."}
+    </p>
+    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:16px;margin:16px 0;font-size:13px;color:#374151;">
+      <p style="margin:0 0 6px;"><strong>Guest:</strong> {booking['customer_name']} ({booking['phone']}, {booking['email']})</p>
+      <p style="margin:0 0 6px;"><strong>Date:</strong> {booking['booking_date']} at {booking['booking_time']}</p>
+      <p style="margin:0 0 6px;"><strong>Party size:</strong> {booking['party_size']}</p>
+      <p style="margin:0;"><strong>Seating:</strong> {booking['seating_preference'].title()}</p>
+    </div>
+    <a href="{notification_service.DASHBOARD_URL}/table-bookings"
+       style="display:inline-block;background:#1a1a1a;color:#fff;padding:10px 20px;
+              border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">
+      View in Table Bookings
+    </a>
+    <p style="font-size:12px;color:#9ca3af;margin-top:24px;">— Artcaffe AI Marketing System</p>
+  </div>
+</div>
+"""
+    return subject, html
+
+
+def _resend_branch_email_only(booking: dict, location: dict) -> None:
+    """Standalone resend of just the branch email — a separate DB write
+    from _send_booking_notifications since it touches only one channel,
+    used by POST /{booking_id}/resend-branch-email."""
+    location_name = location.get("name") or "Artcaffe"
+    branch_email = location.get("branch_email")
+    update: dict = {}
+    if branch_email:
+        try:
+            subject, html = _branch_email_html(booking, location_name)
+            sent = notification_service._send_email(branch_email, subject, html)
+            update["branch_email_sent"] = sent
+            update["branch_email_error"] = None if sent else "Email provider not configured or send failed"
+        except Exception as exc:  # noqa: BLE001
+            update["branch_email_sent"] = False
+            update["branch_email_error"] = str(exc)[:300]
+    else:
+        update["branch_email_sent"] = False
+        update["branch_email_error"] = "No branch email configured for this location"
+    update["updated_at"] = _now()
+    sb.table("table_bookings").update(update).eq("id", booking["id"]).execute()
+
+
 def _notify_admins_of_booking(booking: dict, location_name: str) -> None:
     """Fans out to every active admin/content_manager who hasn't opted out
     (team inbox row + audit log + email), same convention as approval_needed
@@ -226,12 +279,16 @@ def _notify_admins_of_booking(booking: dict, location_name: str) -> None:
 
 
 def _send_booking_notifications(
-    booking: dict, location_name: str, notify_admins: bool = True, directions_url: Optional[str] = None,
+    booking: dict, location: dict, notify_admins: bool = True,
 ) -> None:
-    """Fires customer email, customer SMS, staff SMS, and (on first creation
-    only) an admin team notification — independently, so one channel
-    failing never blocks another, and the row always reflects exactly what
-    did/didn't go out."""
+    """Fires customer email, customer SMS, staff SMS, branch-manager email,
+    and (on first creation only) an admin team notification — each
+    independently, so one channel failing never blocks another, and the
+    row always reflects exactly what did/didn't go out."""
+    location = location or {}
+    location_name = location.get("name") or "Artcaffe"
+    directions_url = _directions_url(location) if location else None
+
     if notify_admins:
         _notify_admins_of_booking(booking, location_name)
 
@@ -246,6 +303,20 @@ def _send_booking_notifications(
     except Exception as exc:  # noqa: BLE001
         update["email_sent"] = False
         update["email_error"] = str(exc)[:300]
+
+    branch_email = location.get("branch_email")
+    if branch_email:
+        try:
+            b_subject, b_html = _branch_email_html(booking, location_name)
+            b_sent = notification_service._send_email(branch_email, b_subject, b_html)
+            update["branch_email_sent"] = b_sent
+            update["branch_email_error"] = None if b_sent else "Email provider not configured or send failed"
+        except Exception as exc:  # noqa: BLE001
+            update["branch_email_sent"] = False
+            update["branch_email_error"] = str(exc)[:300]
+    else:
+        update["branch_email_sent"] = False
+        update["branch_email_error"] = "No branch email configured for this location"
 
     creds = _sms_credentials()
     if creds:
@@ -306,7 +377,7 @@ def create_booking(body: BookingCreate, bg: BackgroundTasks):
 
     loc_res = (
         sb.table("locations")
-        .select("id,name,address,latitude,longitude,google_place_id")
+        .select("id,name,address,latitude,longitude,google_place_id,branch_email")
         .eq("id", body.location_id)
         .eq("status", "active")
         .maybe_single()
@@ -315,8 +386,6 @@ def create_booking(body: BookingCreate, bg: BackgroundTasks):
     if not loc_res or not loc_res.data:
         raise HTTPException(400, "Unknown or inactive location")
     location = loc_res.data
-    location_name = location["name"]
-    directions_url = _directions_url(location)
 
     status = "confirmed" if body.party_size <= LARGE_PARTY_THRESHOLD else "pending"
     row = {
@@ -333,7 +402,7 @@ def create_booking(body: BookingCreate, bg: BackgroundTasks):
     if not booking:
         raise HTTPException(500, "Booking was not created")
 
-    bg.add_task(_send_booking_notifications, booking, location_name, directions_url=directions_url)
+    bg.add_task(_send_booking_notifications, booking, location)
     return {"ok": True, "booking_id": booking["id"], "status": status}
 
 
@@ -426,26 +495,22 @@ def update_booking(booking_id: str, body: BookingUpdate, bg: BackgroundTasks):
     if body.status == "confirmed" and existing["status"] != "confirmed" and not existing.get("sms_sent") and not existing.get("email_sent"):
         loc_res = (
             sb.table("locations")
-            .select("name,address,latitude,longitude,google_place_id")
+            .select("name,address,latitude,longitude,google_place_id,branch_email")
             .eq("id", booking["location_id"])
             .maybe_single()
             .execute()
         )
         location = loc_res.data or {} if loc_res else {}
-        location_name = location.get("name", "Artcaffe")
         # notify_admins=False — the admin acting here already knows.
-        bg.add_task(
-            _send_booking_notifications, booking, location_name,
-            notify_admins=False, directions_url=_directions_url(location),
-        )
+        bg.add_task(_send_booking_notifications, booking, location, notify_admins=False)
 
     return {"ok": True, "booking": booking}
 
 
 @router.post("/{booking_id}/resend-confirmation")
 def resend_confirmation(booking_id: str, bg: BackgroundTasks):
-    """Manually re-fires the customer confirmation email/SMS + staff SMS —
-    regardless of prior sms_sent/email_sent state, since this is an
+    """Manually re-fires the customer confirmation email/SMS + staff SMS +
+    branch email — regardless of prior sent state, since this is an
     explicit admin retry after noticing a failed channel."""
     res = sb.table("table_bookings").select("*").eq("id", booking_id).maybe_single().execute()
     if not res or not res.data:
@@ -454,18 +519,39 @@ def resend_confirmation(booking_id: str, bg: BackgroundTasks):
 
     loc_res = (
         sb.table("locations")
-        .select("name,address,latitude,longitude,google_place_id")
+        .select("name,address,latitude,longitude,google_place_id,branch_email")
         .eq("id", booking["location_id"])
         .maybe_single()
         .execute()
     )
     location = loc_res.data or {} if loc_res else {}
-    location_name = location.get("name", "Artcaffe")
-    bg.add_task(
-        _send_booking_notifications, booking, location_name,
-        notify_admins=False, directions_url=_directions_url(location),
-    )
+    bg.add_task(_send_booking_notifications, booking, location, notify_admins=False)
     return {"ok": True, "message": "Resending confirmation email/SMS"}
+
+
+@router.post("/{booking_id}/resend-branch-email")
+def resend_branch_email(booking_id: str, bg: BackgroundTasks):
+    """Manually re-fires just the branch/manager email — independent of
+    the customer confirmation resend, since a branch notification
+    failure shouldn't require re-sending the customer's own email too."""
+    res = sb.table("table_bookings").select("*").eq("id", booking_id).maybe_single().execute()
+    if not res or not res.data:
+        raise HTTPException(404, "Booking not found")
+    booking = res.data
+
+    loc_res = (
+        sb.table("locations")
+        .select("name,branch_email")
+        .eq("id", booking["location_id"])
+        .maybe_single()
+        .execute()
+    )
+    location = loc_res.data or {} if loc_res else {}
+    if not location.get("branch_email"):
+        raise HTTPException(400, "No branch email configured for this location")
+
+    bg.add_task(_resend_branch_email_only, booking, location)
+    return {"ok": True, "message": f"Resending branch email to {location['branch_email']}"}
 
 
 @router.post("/{booking_id}/resend-reminder")
