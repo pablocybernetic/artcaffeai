@@ -298,6 +298,39 @@ def _send_reminder(sb: Client, booking: dict, location: dict) -> bool:
     return any_sent
 
 
+def send_reminder_now(sb: Client, booking_id: str) -> bool:
+    """Manual, admin-triggered resend (table_booking_routes.py's
+    POST /{booking_id}/resend-reminder) — bypasses the scheduled loop's
+    due-window and already-attempted checks entirely, since this is an
+    explicit one-off retry, not a re-arming of the automatic reminder.
+    Reuses _send_reminder so both paths share the exact same per-channel
+    error handling."""
+    res = (
+        sb.table("table_bookings")
+        .select("id,location_id,customer_name,party_size,booking_date,booking_time,phone,email,seating_preference,status")
+        .eq("id", booking_id)
+        .maybe_single()
+        .execute()
+    )
+    if not res or not res.data:
+        print(f"[table_booking_reminder_scheduler] send_reminder_now: booking {booking_id} not found", flush=True)
+        return False
+    booking = res.data
+
+    location: dict = {}
+    if booking.get("location_id"):
+        loc_res = (
+            sb.table("locations")
+            .select("id,name,address,latitude,longitude,google_place_id")
+            .eq("id", booking["location_id"])
+            .maybe_single()
+            .execute()
+        )
+        location = loc_res.data or {} if loc_res else {}
+
+    return _send_reminder(sb, booking, location)
+
+
 def _run_once_sync(sb: Client) -> dict:
     candidates = _get_candidate_bookings(sb)
     if not candidates:

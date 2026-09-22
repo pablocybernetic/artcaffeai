@@ -338,8 +338,30 @@ def create_booking(body: BookingCreate, bg: BackgroundTasks):
 
 
 # ---------------------------------------------------------------------------
-# Admin: list + confirm/decline
+# Admin: list, single booking, edit + operations
 # ---------------------------------------------------------------------------
+def _enrich_bookings(bookings: list[dict]) -> None:
+    """Joins each row's location_name/location_brand/location_directions_url
+    in place — shared by list_bookings, get_booking, and update_booking's
+    response so every admin-facing booking shape carries the same fields."""
+    loc_ids = list({b["location_id"] for b in bookings if b.get("location_id")})
+    locations_by_id: dict[str, dict] = {}
+    if loc_ids:
+        loc_res = (
+            sb.table("locations")
+            .select("id,name,brand_type,address,latitude,longitude,google_place_id")
+            .in_("id", loc_ids)
+            .execute()
+        )
+        locations_by_id = {loc["id"]: loc for loc in (loc_res.data or [])}
+
+    for b in bookings:
+        loc = locations_by_id.get(b.get("location_id")) or {}
+        b["location_name"] = loc.get("name")
+        b["location_brand"] = loc.get("brand_type")
+        b["location_directions_url"] = _directions_url(loc) if loc else None
+
+
 @router.get("")
 def list_bookings(
     location_id: Optional[str] = None,
@@ -358,46 +380,46 @@ def list_bookings(
         q = q.lte("booking_date", date_to)
     res = q.execute()
     bookings = res.data or []
-
-    loc_ids = list({b["location_id"] for b in bookings if b.get("location_id")})
-    locations_by_id: dict[str, dict] = {}
-    if loc_ids:
-        loc_res = (
-            sb.table("locations")
-            .select("id,name,brand_type,address,latitude,longitude,google_place_id")
-            .in_("id", loc_ids)
-            .execute()
-        )
-        locations_by_id = {loc["id"]: loc for loc in (loc_res.data or [])}
-
-    for b in bookings:
-        loc = locations_by_id.get(b.get("location_id")) or {}
-        b["location_name"] = loc.get("name")
-        b["location_brand"] = loc.get("brand_type")
-        b["location_directions_url"] = _directions_url(loc) if loc else None
-
+    _enrich_bookings(bookings)
     return {"ok": True, "bookings": bookings}
 
 
-class BookingStatusUpdate(BaseModel):
-    status: str
+class BookingUpdate(BaseModel):
+    status: Optional[str] = None
+    party_size: Optional[int] = None
+    booking_date: Optional[str] = None
+    booking_time: Optional[str] = None
+    seating_preference: Optional[str] = None
+    special_occasion: Optional[str] = None
 
 
 @router.patch("/{booking_id}")
-def update_booking_status(booking_id: str, body: BookingStatusUpdate, bg: BackgroundTasks):
-    if body.status not in ("pending", "confirmed", "declined", "cancelled"):
+def update_booking(booking_id: str, body: BookingUpdate, bg: BackgroundTasks):
+    if body.status is not None and body.status not in ("pending", "confirmed", "declined", "cancelled"):
         raise HTTPException(400, "Invalid status")
+    if body.seating_preference is not None and body.seating_preference not in ("flexible", "inside", "outside"):
+        raise HTTPException(400, "Invalid seating preference")
+    if body.party_size is not None and body.party_size <= 0:
+        raise HTTPException(400, "Party size must be at least 1")
 
     res = sb.table("table_bookings").select("*").eq("id", booking_id).maybe_single().execute()
     if not res or not res.data:
         raise HTTPException(404, "Booking not found")
     existing = res.data
 
-    update = {"status": body.status, "updated_at": _now()}
-    upd_res = sb.table("table_bookings").update(update).eq("id", booking_id).execute()
+    update = body.dict(exclude_unset=True)
+    if not update:
+        raise HTTPException(400, "No fields to update")
+    update["updated_at"] = _now()
+
+    try:
+        upd_res = sb.table("table_bookings").update(update).eq("id", booking_id).execute()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"Could not update booking: {exc}") from exc
     booking = (upd_res.data or [None])[0]
     if not booking:
         raise HTTPException(404, "Booking not found")
+    _enrich_bookings([booking])
 
     # Newly confirmed from pending, and notifications hadn't already gone out
     # — fire them now the same way the auto-confirm path does.
@@ -418,6 +440,47 @@ def update_booking_status(booking_id: str, body: BookingStatusUpdate, bg: Backgr
         )
 
     return {"ok": True, "booking": booking}
+
+
+@router.post("/{booking_id}/resend-confirmation")
+def resend_confirmation(booking_id: str, bg: BackgroundTasks):
+    """Manually re-fires the customer confirmation email/SMS + staff SMS —
+    regardless of prior sms_sent/email_sent state, since this is an
+    explicit admin retry after noticing a failed channel."""
+    res = sb.table("table_bookings").select("*").eq("id", booking_id).maybe_single().execute()
+    if not res or not res.data:
+        raise HTTPException(404, "Booking not found")
+    booking = res.data
+
+    loc_res = (
+        sb.table("locations")
+        .select("name,address,latitude,longitude,google_place_id")
+        .eq("id", booking["location_id"])
+        .maybe_single()
+        .execute()
+    )
+    location = loc_res.data or {} if loc_res else {}
+    location_name = location.get("name", "Artcaffe")
+    bg.add_task(
+        _send_booking_notifications, booking, location_name,
+        notify_admins=False, directions_url=_directions_url(location),
+    )
+    return {"ok": True, "message": "Resending confirmation email/SMS"}
+
+
+@router.post("/{booking_id}/resend-reminder")
+def resend_reminder(booking_id: str, bg: BackgroundTasks):
+    """Manually re-fires the reminder email/SMS, bypassing the scheduler's
+    own due-window and already-attempted checks — an explicit one-off
+    retry, not a re-arming of the scheduled reminder."""
+    from table_booking_reminder_scheduler import send_reminder_now  # noqa: PLC0415
+
+    res = sb.table("table_bookings").select("id").eq("id", booking_id).maybe_single().execute()
+    if not res or not res.data:
+        raise HTTPException(404, "Booking not found")
+    bg.add_task(send_reminder_now, sb, booking_id)
+    return {"ok": True, "message": "Resending reminder email/SMS"}
+
 
 
 # ---------------------------------------------------------------------------
@@ -538,3 +601,17 @@ def update_reminder_settings(body: ReminderSettingsUpdate):
     if body.enabled is not None:
         set_enabled(body.enabled)
     return {"ok": True, "data": get_state()}
+
+
+# Registered last of all GET routes on this router — a literal
+# single-segment path like /settings would otherwise be swallowed by
+# this catch-all {booking_id}, matching the ordering rule documented
+# in locations_routes.py.
+@router.get("/{booking_id}")
+def get_booking(booking_id: str):
+    res = sb.table("table_bookings").select("*").eq("id", booking_id).maybe_single().execute()
+    if not res or not res.data:
+        raise HTTPException(404, "Booking not found")
+    booking = res.data
+    _enrich_bookings([booking])
+    return {"ok": True, "booking": booking}
