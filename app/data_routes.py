@@ -339,26 +339,24 @@ def _pull_ads_and_transactions(project: str, dataset: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Month-to-date ad spend — queried live on every call (not the cached
-# 7-day platform_data_snapshots row) so the dashboard's Monthly Ad Spend
-# KPI reflects actual BigQuery spend for the current calendar month
-# instead of a manually-entered budget_allocations.spent_usd total.
+# Ad spend for an arbitrary date range — queried live on every call (not
+# the cached 7-day platform_data_snapshots row) so the dashboard's
+# Monthly Ad Spend KPI can follow the same date-range picker as the rest
+# of the dashboard instead of a manually-entered budget_allocations total.
 # ---------------------------------------------------------------------------
-def _pull_month_to_date_ad_spend(project: str, dataset: str) -> dict[str, Any]:
+def _pull_ad_spend_range(project: str, dataset: str, start: date, end: date) -> dict[str, Any]:
     client = _bq_client()
-    today = date.today()
-    month_start = today.replace(day=1)
     sql = f"""
     SELECT ROUND(SUM(CAST(spend AS FLOAT64)), 2) AS total_spend
     FROM `{project}.{dataset}.table__blend__cost__session__master`
-    WHERE event_date BETWEEN DATE('{month_start.isoformat()}') AND DATE('{today.isoformat()}')
+    WHERE event_date BETWEEN DATE('{start.isoformat()}') AND DATE('{end.isoformat()}')
     """
     rows = list(client.query(sql).result())
     total_spend = float(rows[0]["total_spend"] or 0) if rows and rows[0]["total_spend"] is not None else 0.0
     return {
         "total_spend": round(total_spend, 2),
-        "month_start": month_start.isoformat(),
-        "as_of": today.isoformat(),
+        "start": start.isoformat(),
+        "end": end.isoformat(),
     }
 
 
@@ -429,16 +427,21 @@ def get_social_posts(
     return {"ok": True, "posts": res.data or []}
 
 
-@router.get("/ads-spend/month-to-date")
-def get_month_to_date_ad_spend():
-    """Live BigQuery total ad spend for the current calendar month —
-    powers the dashboard's Monthly Ad Spend KPI. Never raises: a
-    misconfigured or unreachable BigQuery should degrade the KPI to a
-    dash, not break the dashboard."""
+@router.get("/ads-spend")
+def get_ad_spend(start: Optional[str] = None, end: Optional[str] = None):
+    """Live BigQuery total ad spend for a date range — powers the
+    dashboard's Monthly Ad Spend KPI, which passes its own date-range
+    picker's start/end so the figure follows the same window as the
+    rest of the dashboard. Defaults to month-to-date when omitted.
+    Never raises: a misconfigured or unreachable BigQuery should
+    degrade the KPI to a dash, not break the dashboard."""
     if not BQ_SERVICE_ACCOUNT_JSON:
         return {"ok": False, "error": "BQ_SERVICE_ACCOUNT_JSON not configured"}
     try:
-        data = _pull_month_to_date_ad_spend(BQ_PROJECT_ID, BQ_GADS_DATASET)
+        today = date.today()
+        start_d = date.fromisoformat(start) if start else today.replace(day=1)
+        end_d = date.fromisoformat(end) if end else today
+        data = _pull_ad_spend_range(BQ_PROJECT_ID, BQ_GADS_DATASET, start_d, end_d)
         return {"ok": True, **data}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)[:300]}
