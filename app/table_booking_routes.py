@@ -282,6 +282,7 @@ def _send_cancellation_notification(booking: dict, location: dict) -> None:
     except Exception as exc:  # noqa: BLE001
         update["cancellation_email_sent"] = False
         update["cancellation_email_error"] = str(exc)[:300]
+    update["cancellation_email_sent_at"] = _now()
 
     creds = _sms_credentials()
     if creds:
@@ -299,6 +300,7 @@ def _send_cancellation_notification(booking: dict, location: dict) -> None:
         except Exception as exc:  # noqa: BLE001
             update["cancellation_sms_sent"] = False
             update["cancellation_sms_error"] = str(exc)[:300]
+        update["cancellation_sms_sent_at"] = _now()
     else:
         update["cancellation_sms_sent"] = False
         update["cancellation_sms_error"] = "SMS credentials not configured"
@@ -388,6 +390,7 @@ def _resend_branch_email_only(booking: dict, location: dict) -> None:
         except Exception as exc:  # noqa: BLE001
             update["branch_email_sent"] = False
             update["branch_email_error"] = str(exc)[:300]
+        update["branch_email_sent_at"] = _now()
     else:
         update["branch_email_sent"] = False
         update["branch_email_error"] = "No branch email configured for this location"
@@ -440,6 +443,7 @@ def _send_booking_notifications(
     except Exception as exc:  # noqa: BLE001
         update["email_sent"] = False
         update["email_error"] = str(exc)[:300]
+    update["email_sent_at"] = _now()
 
     branch_email = location.get("branch_email")
     if branch_email:
@@ -451,6 +455,7 @@ def _send_booking_notifications(
         except Exception as exc:  # noqa: BLE001
             update["branch_email_sent"] = False
             update["branch_email_error"] = str(exc)[:300]
+        update["branch_email_sent_at"] = _now()
     else:
         update["branch_email_sent"] = False
         update["branch_email_error"] = "No branch email configured for this location"
@@ -471,6 +476,7 @@ def _send_booking_notifications(
         except Exception as exc:  # noqa: BLE001
             update["sms_sent"] = False
             update["sms_error"] = str(exc)[:300]
+        update["sms_sent_at"] = _now()
 
         staff_phones = _sms_settings().get("staff_notification_phones") or []
         if staff_phones:
@@ -494,6 +500,7 @@ def _send_booking_notifications(
             # several numbers failed.
             update["staff_notified"] = successes > 0
             update["staff_notify_error"] = "; ".join(failures)[:300] if failures else None
+            update["staff_notified_at"] = _now()
         else:
             update["staff_notify_error"] = "No staff notification phone configured"
     else:
@@ -570,6 +577,7 @@ def _enrich_bookings(bookings: list[dict]) -> None:
         loc = locations_by_id.get(b.get("location_id")) or {}
         b["location_name"] = loc.get("name")
         b["location_brand"] = loc.get("brand_type")
+        b["location_address"] = loc.get("address")
         b["location_directions_url"] = _directions_url(loc) if loc else None
 
 
