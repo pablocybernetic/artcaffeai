@@ -339,6 +339,30 @@ def _pull_ads_and_transactions(project: str, dataset: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Month-to-date ad spend — queried live on every call (not the cached
+# 7-day platform_data_snapshots row) so the dashboard's Monthly Ad Spend
+# KPI reflects actual BigQuery spend for the current calendar month
+# instead of a manually-entered budget_allocations.spent_usd total.
+# ---------------------------------------------------------------------------
+def _pull_month_to_date_ad_spend(project: str, dataset: str) -> dict[str, Any]:
+    client = _bq_client()
+    today = date.today()
+    month_start = today.replace(day=1)
+    sql = f"""
+    SELECT ROUND(SUM(CAST(spend AS FLOAT64)), 2) AS total_spend
+    FROM `{project}.{dataset}.table__blend__cost__session__master`
+    WHERE event_date BETWEEN DATE('{month_start.isoformat()}') AND DATE('{today.isoformat()}')
+    """
+    rows = list(client.query(sql).result())
+    total_spend = float(rows[0]["total_spend"] or 0) if rows and rows[0]["total_spend"] is not None else 0.0
+    return {
+        "total_spend": round(total_spend, 2),
+        "month_start": month_start.isoformat(),
+        "as_of": today.isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Snapshot helpers
 # ---------------------------------------------------------------------------
 def _upsert_snapshot(concept_id: str, platform: str, summary: dict) -> dict:
@@ -403,6 +427,21 @@ def get_social_posts(
         q = q.lte("posted_at", f"{end}T23:59:59")
     res = q.execute()
     return {"ok": True, "posts": res.data or []}
+
+
+@router.get("/ads-spend/month-to-date")
+def get_month_to_date_ad_spend():
+    """Live BigQuery total ad spend for the current calendar month —
+    powers the dashboard's Monthly Ad Spend KPI. Never raises: a
+    misconfigured or unreachable BigQuery should degrade the KPI to a
+    dash, not break the dashboard."""
+    if not BQ_SERVICE_ACCOUNT_JSON:
+        return {"ok": False, "error": "BQ_SERVICE_ACCOUNT_JSON not configured"}
+    try:
+        data = _pull_month_to_date_ad_spend(BQ_PROJECT_ID, BQ_GADS_DATASET)
+        return {"ok": True, **data}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:300]}
 
 
 @router.post("/snapshot")
