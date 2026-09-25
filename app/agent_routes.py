@@ -704,6 +704,7 @@ def env_check():
 def test_notification():
     """Send a live test notification email and report the result."""
     import traceback  # noqa: PLC0415
+    from email_layout import render_email  # noqa: PLC0415
     api_key = os.environ.get("RESEND_API_KEY")
     from_addr = os.environ.get("NOTIFY_FROM_EMAIL", "noreply@artcaffemarket.co.ke")
     to_email = os.environ.get("NOTIFY_TO_EMAIL", "pgitau@artcaffe.co.ke")
@@ -716,7 +717,7 @@ def test_notification():
             "from": from_addr,
             "to": to_email,
             "subject": "Artcaffe AI — Live notification test",
-            "html": "<p>Live test from FastAPI process.</p>",
+            "html": render_email("<p>Your email notifications are connected and ready.</p>", heading="Email connection confirmed", category="Marketing update"),
         })
         return {"ok": True, "from": from_addr, "to": to_email, "result": str(result)}
     except Exception as exc:

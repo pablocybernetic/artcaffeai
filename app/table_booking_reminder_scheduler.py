@@ -175,22 +175,22 @@ def _reminder_action_buttons_html(
     buttons = []
     if directions_url:
         buttons.append(
-            f'<a href="{directions_url}" style="display:inline-block;background:#1a1a1a;color:#fff;'
-            f'padding:10px 20px;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">'
+            f'<a href="{directions_url}" style="display:inline-block;background:#087f3b;color:#fff;'
+            f'padding:10px 16px;border-radius:8px;margin:0 8px 8px 0;text-decoration:none;font-size:13px;font-weight:600;">'
             f'Get Directions</a>'
         )
     if calendar_url:
         buttons.append(
             f'<a href="{calendar_url}" style="display:inline-block;background:#fff;color:#1a1a1a;'
-            f'border:1px solid #d1d5db;padding:9px 20px;border-radius:6px;text-decoration:none;'
-            f'font-size:13px;font-weight:600;margin-left:8px;">'
+            f'border:1px solid #d1d5db;padding:9px 16px;border-radius:8px;text-decoration:none;'
+            f'font-size:13px;font-weight:600;margin:0 8px 8px 0;">'
             f'Add to Google Calendar</a>'
         )
     if menu_url:
         buttons.append(
             f'<a href="{menu_url}" style="display:inline-block;background:#fff;color:#1a1a1a;'
-            f'border:1px solid #d1d5db;padding:9px 20px;border-radius:6px;text-decoration:none;'
-            f'font-size:13px;font-weight:600;margin-left:8px;">'
+            f'border:1px solid #d1d5db;padding:9px 16px;border-radius:8px;text-decoration:none;'
+            f'font-size:13px;font-weight:600;margin:0 8px 8px 0;">'
             f'View Menu</a>'
         )
     if not buttons:
@@ -203,25 +203,18 @@ def _reminder_email_html(
     calendar_url: Optional[str] = None, menu_url: Optional[str] = None,
 ) -> tuple[str, str]:
     subject = f"Artcaffe — See you soon at {location_name}"
-    html = f"""
-<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1a1a1a;">
-  <div style="background:#1a1a1a;padding:20px 24px;border-radius:8px 8px 0 0;">
-    <p style="color:#fff;font-size:18px;font-weight:700;margin:0;">Artcaffe</p>
-  </div>
-  <div style="background:#fff;padding:24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+    html = notification_service.render_email(f"""
     <p style="font-size:16px;font-weight:700;color:#1a1a1a;">See you soon!</p>
     <p style="font-size:14px;color:#374151;">Hi {booking['customer_name']}, this is a reminder about your upcoming table booking.</p>
-    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:16px;margin:16px 0;font-size:13px;color:#374151;">
+    <div style="background:#f6f8f6;border:1px solid #e2e7e3;border-radius:10px;padding:14px;margin:14px 0;font-size:13px;color:#374151;">
       <p style="margin:0 0 6px;"><strong>Location:</strong> {location_name}</p>
       <p style="margin:0 0 6px;"><strong>Date:</strong> {booking['booking_date']}</p>
       <p style="margin:0 0 6px;"><strong>Time:</strong> {booking['booking_time']}</p>
       <p style="margin:0;"><strong>Party size:</strong> {booking['party_size']}</p>
     </div>
     {_reminder_action_buttons_html(directions_url, calendar_url, menu_url)}
-    <p style="font-size:12px;color:#9ca3af;margin-top:24px;">— Artcaffe</p>
-  </div>
-</div>
-"""
+
+""", heading=f"Artcaffe", category="Table booking", preheader=subject)
     return subject, html
 
 
@@ -238,28 +231,21 @@ def _branch_reminder_email_html(booking: dict, location_name: str) -> tuple[str,
     a heads-up that this booking is coming up soon, same style as the
     branch's original new-booking email in table_booking_routes.py."""
     subject = f"{location_name} — Upcoming booking reminder: {booking['customer_name']} ({booking['party_size']} pax)"
-    html = f"""
-<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1a1a1a;">
-  <div style="background:#1a1a1a;padding:20px 24px;border-radius:8px 8px 0 0;">
-    <p style="color:#fff;font-size:18px;font-weight:700;margin:0;">Artcaffe — {location_name}</p>
-  </div>
-  <div style="background:#fff;padding:24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+    html = notification_service.render_email(f"""
     <p style="font-size:15px;color:#374151;">Reminder — this booking is coming up soon.</p>
-    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:16px;margin:16px 0;font-size:13px;color:#374151;">
+    <div style="background:#f6f8f6;border:1px solid #e2e7e3;border-radius:10px;padding:14px;margin:14px 0;font-size:13px;color:#374151;">
       <p style="margin:0 0 6px;"><strong>Guest:</strong> {booking['customer_name']} ({booking['phone']}, {booking['email']})</p>
       <p style="margin:0 0 6px;"><strong>Date:</strong> {booking['booking_date']} at {booking['booking_time']}</p>
       <p style="margin:0 0 6px;"><strong>Party size:</strong> {booking['party_size']}</p>
       <p style="margin:0;"><strong>Seating:</strong> {booking['seating_preference'].title()}</p>
     </div>
     <a href="{notification_service.DASHBOARD_URL}/table-bookings"
-       style="display:inline-block;background:#1a1a1a;color:#fff;padding:10px 20px;
-              border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">
+       style="display:inline-block;background:#087f3b;color:#fff;padding:10px 16px;
+              border-radius:8px;text-decoration:none;font-size:13px;font-weight:600;">
       View in Table Bookings
     </a>
-    <p style="font-size:12px;color:#9ca3af;margin-top:24px;">— Artcaffe AI Marketing System</p>
-  </div>
-</div>
-"""
+
+""", heading=f"Artcaffe — {location_name}", category="Table booking", preheader=subject)
     return subject, html
 
 

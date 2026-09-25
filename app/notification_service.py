@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from supabase import Client
+from email_layout import render_email
 
 RESEND_API_KEY   = os.environ.get("RESEND_API_KEY")
 FROM_EMAIL       = os.environ.get("NOTIFY_FROM_EMAIL", "noreply@artcaffemarket.co.ke")
@@ -52,7 +53,7 @@ def _send_email(to_email: str, subject: str, html: str, attachments: Optional[li
             "from": from_addr,
             "to": to_email,
             "subject": subject,
-            "html": html,
+            "html": render_email(html, heading=subject, category="Marketing update", preheader=subject),
         }
         if attachments:
             payload["attachments"] = attachments
@@ -280,7 +281,7 @@ def notify_approval_needed_to_team(
     html = (
         f"<p>Hi there,</p>"
         f"<p>The content item <strong>{title}</strong> is awaiting your approval.</p>"
-        f"<p><a href='{DASHBOARD_URL}/briefs' style='background:#1a1a1a;color:#fff;"
+        f"<p><a href='{DASHBOARD_URL}/briefs' style='background:#087f3b;color:#fff;"
         f"padding:8px 16px;border-radius:6px;text-decoration:none;'>Review in dashboard</a></p>"
         f"<p>— Artcaffe AI</p>"
     )
@@ -389,17 +390,12 @@ def notify_post_scheduled(
     except Exception:
         dt_fmt = publish_at
 
-    html = f"""
-<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1a1a1a;">
-  <div style="background:#1a1a1a;padding:20px 24px;border-radius:8px 8px 0 0;">
-    <p style="color:#fff;font-size:18px;font-weight:700;margin:0;">Artcaffe AI Marketing</p>
-  </div>
-  <div style="background:#fff;padding:24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+    html = render_email(f"""
     <p style="font-size:15px;color:#374151;">Hello,</p>
     <p style="font-size:15px;color:#374151;">
       Your post has been <strong>scheduled successfully</strong>.
     </p>
-    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:16px;margin:16px 0;">
+    <div style="background:#f6f8f6;border:1px solid #e2e7e3;border-radius:10px;padding:14px;margin:14px 0;">
       <p style="margin:0 0 8px;font-weight:700;font-size:14px;color:#1a1a1a;">"{title}"</p>
       <p style="margin:4px 0;font-size:13px;color:#6b7280;">
         <strong>Scheduled for:</strong> {dt_fmt}
@@ -408,14 +404,12 @@ def notify_post_scheduled(
       <ul style="margin:0;padding-left:18px;font-size:13px;color:#374151;">{platform_lines}</ul>
     </div>
     <a href="{DASHBOARD_URL}/calendar"
-       style="display:inline-block;background:#1a1a1a;color:#fff;padding:10px 20px;
-              border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">
+       style="display:inline-block;background:#087f3b;color:#fff;padding:10px 16px;
+              border-radius:8px;text-decoration:none;font-size:13px;font-weight:600;">
       View in Calendar
     </a>
-    <p style="font-size:12px;color:#9ca3af;margin-top:24px;">— Artcaffe AI Marketing System</p>
-  </div>
-</div>
-"""
+
+""", heading=f"Artcaffe AI Marketing", category="Marketing update")
     return _notify_relevant_team(
         sb,
         notif_type="post_scheduled",
@@ -471,12 +465,7 @@ def notify_post_published(
         f'Artcaffe — Publish failed: "{title}"'
     )
 
-    html = f"""
-<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1a1a1a;">
-  <div style="background:#1a1a1a;padding:20px 24px;border-radius:8px 8px 0 0;">
-    <p style="color:#fff;font-size:18px;font-weight:700;margin:0;">Artcaffe AI Marketing</p>
-  </div>
-  <div style="background:#fff;padding:24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+    html = render_email(f"""
     <p style="font-size:15px;color:#374151;">Hello,</p>
     <p style="font-size:15px;color:#374151;">
       Your post <strong>"{title}"</strong> has been published.
@@ -494,14 +483,12 @@ def notify_post_published(
       <tbody>{rows}</tbody>
     </table>
     <a href="{DASHBOARD_URL}/briefs"
-       style="display:inline-block;background:#1a1a1a;color:#fff;padding:10px 20px;
-              border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">
+       style="display:inline-block;background:#087f3b;color:#fff;padding:10px 16px;
+              border-radius:8px;text-decoration:none;font-size:13px;font-weight:600;">
       View in Dashboard
     </a>
-    <p style="font-size:12px;color:#9ca3af;margin-top:24px;">— Artcaffe AI Marketing System</p>
-  </div>
-</div>
-"""
+
+""", heading=f"Artcaffe AI Marketing", category="Marketing update")
     return _notify_relevant_team(
         sb,
         notif_type="post_published",

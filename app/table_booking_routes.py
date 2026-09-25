@@ -147,22 +147,22 @@ def _action_buttons_html(
     buttons = []
     if directions_url:
         buttons.append(
-            f'<a href="{directions_url}" style="display:inline-block;background:#1a1a1a;color:#fff;'
-            f'padding:10px 20px;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">'
+            f'<a href="{directions_url}" style="display:inline-block;background:#087f3b;color:#fff;'
+            f'padding:10px 16px;border-radius:8px;margin:0 8px 8px 0;text-decoration:none;font-size:13px;font-weight:600;">'
             f'Get Directions</a>'
         )
     if calendar_url:
         buttons.append(
             f'<a href="{calendar_url}" style="display:inline-block;background:#fff;color:#1a1a1a;'
-            f'border:1px solid #d1d5db;padding:9px 20px;border-radius:6px;text-decoration:none;'
-            f'font-size:13px;font-weight:600;margin-left:8px;">'
+            f'border:1px solid #d1d5db;padding:9px 16px;border-radius:8px;text-decoration:none;'
+            f'font-size:13px;font-weight:600;margin:0 8px 8px 0;">'
             f'Add to Google Calendar</a>'
         )
     if menu_url:
         buttons.append(
             f'<a href="{menu_url}" style="display:inline-block;background:#fff;color:#1a1a1a;'
-            f'border:1px solid #d1d5db;padding:9px 20px;border-radius:6px;text-decoration:none;'
-            f'font-size:13px;font-weight:600;margin-left:8px;">'
+            f'border:1px solid #d1d5db;padding:9px 16px;border-radius:8px;text-decoration:none;'
+            f'font-size:13px;font-weight:600;margin:0 8px 8px 0;">'
             f'View Menu</a>'
         )
     if not buttons:
@@ -190,16 +190,11 @@ def _customer_email_html(
             f"Groups larger than {LARGE_PARTY_THRESHOLD} need a quick check with the team — "
             f"we'll call or message you shortly to confirm."
         )
-    html = f"""
-<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1a1a1a;">
-  <div style="background:#1a1a1a;padding:20px 24px;border-radius:8px 8px 0 0;">
-    <p style="color:#fff;font-size:18px;font-weight:700;margin:0;">Artcaffe</p>
-  </div>
-  <div style="background:#fff;padding:24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+    html = notification_service.render_email(f"""
     <p style="font-size:16px;font-weight:700;color:#1a1a1a;">{headline}</p>
     <p style="font-size:14px;color:#374151;">Hi {booking['customer_name']},</p>
     <p style="font-size:14px;color:#374151;">{body}</p>
-    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:16px;margin:16px 0;font-size:13px;color:#374151;">
+    <div style="background:#f6f8f6;border:1px solid #e2e7e3;border-radius:10px;padding:14px;margin:14px 0;font-size:13px;color:#374151;">
       <p style="margin:0 0 6px;"><strong>Location:</strong> {location_name}</p>
       <p style="margin:0 0 6px;"><strong>Date:</strong> {booking['booking_date']}</p>
       <p style="margin:0 0 6px;"><strong>Time:</strong> {booking['booking_time']}</p>
@@ -207,10 +202,8 @@ def _customer_email_html(
       <p style="margin:0;"><strong>Seating:</strong> {booking['seating_preference'].title()}</p>
     </div>
     {_action_buttons_html(directions_url, calendar_url, menu_url)}
-    <p style="font-size:12px;color:#9ca3af;margin-top:24px;">— Artcaffe</p>
-  </div>
-</div>
-"""
+
+""", heading=f"Artcaffe", category="Table booking", preheader=subject)
     return subject, html
 
 
@@ -239,24 +232,17 @@ def _staff_sms_text(booking: dict, location_name: str) -> str:
 
 def _cancellation_email_html(booking: dict, location_name: str) -> tuple[str, str]:
     subject = f"Artcaffe — Your booking at {location_name} has been cancelled"
-    html = f"""
-<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1a1a1a;">
-  <div style="background:#1a1a1a;padding:20px 24px;border-radius:8px 8px 0 0;">
-    <p style="color:#fff;font-size:18px;font-weight:700;margin:0;">Artcaffe</p>
-  </div>
-  <div style="background:#fff;padding:24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+    html = notification_service.render_email(f"""
     <p style="font-size:16px;font-weight:700;color:#1a1a1a;">Your booking has been cancelled</p>
     <p style="font-size:14px;color:#374151;">Hi {booking['customer_name']}, your table booking below has been cancelled.</p>
-    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:16px;margin:16px 0;font-size:13px;color:#374151;">
+    <div style="background:#f6f8f6;border:1px solid #e2e7e3;border-radius:10px;padding:14px;margin:14px 0;font-size:13px;color:#374151;">
       <p style="margin:0 0 6px;"><strong>Location:</strong> {location_name}</p>
       <p style="margin:0 0 6px;"><strong>Date:</strong> {booking['booking_date']}</p>
       <p style="margin:0;"><strong>Time:</strong> {booking['booking_time']}</p>
     </div>
     <p style="font-size:14px;color:#374151;">If this wasn't expected, or you'd like to book again, just get in touch or submit a new request.</p>
-    <p style="font-size:12px;color:#9ca3af;margin-top:24px;">— Artcaffe</p>
-  </div>
-</div>
-"""
+
+""", heading=f"Artcaffe", category="Table booking", preheader=subject)
     return subject, html
 
 
@@ -316,16 +302,11 @@ def _admin_notification_html(booking: dict, location_name: str) -> tuple[str, st
         if needs_action else
         f"Artcaffe — New table booking: {booking['customer_name']} ({booking['party_size']} pax)"
     )
-    html = f"""
-<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1a1a1a;">
-  <div style="background:#1a1a1a;padding:20px 24px;border-radius:8px 8px 0 0;">
-    <p style="color:#fff;font-size:18px;font-weight:700;margin:0;">Artcaffe AI Marketing</p>
-  </div>
-  <div style="background:#fff;padding:24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+    html = notification_service.render_email(f"""
     <p style="font-size:15px;color:#374151;">
       {"A party of over " + str(LARGE_PARTY_THRESHOLD) + " needs your confirmation." if needs_action else "A new table booking was confirmed automatically."}
     </p>
-    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:16px;margin:16px 0;font-size:13px;color:#374151;">
+    <div style="background:#f6f8f6;border:1px solid #e2e7e3;border-radius:10px;padding:14px;margin:14px 0;font-size:13px;color:#374151;">
       <p style="margin:0 0 6px;"><strong>Guest:</strong> {booking['customer_name']} ({booking['phone']})</p>
       <p style="margin:0 0 6px;"><strong>Location:</strong> {location_name}</p>
       <p style="margin:0 0 6px;"><strong>Date:</strong> {booking['booking_date']} at {booking['booking_time']}</p>
@@ -333,44 +314,35 @@ def _admin_notification_html(booking: dict, location_name: str) -> tuple[str, st
       <p style="margin:0;"><strong>Seating:</strong> {booking['seating_preference'].title()}</p>
     </div>
     <a href="{notification_service.DASHBOARD_URL}/table-bookings"
-       style="display:inline-block;background:#1a1a1a;color:#fff;padding:10px 20px;
-              border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">
+       style="display:inline-block;background:#087f3b;color:#fff;padding:10px 16px;
+              border-radius:8px;text-decoration:none;font-size:13px;font-weight:600;">
       {"Review in Table Bookings" if needs_action else "View in Table Bookings"}
     </a>
-    <p style="font-size:12px;color:#9ca3af;margin-top:24px;">— Artcaffe AI Marketing System</p>
-  </div>
-</div>
-"""
+
+""", heading=f"Artcaffe AI Marketing", category="Table booking", preheader=subject)
     return subject, html
 
 
 def _branch_email_html(booking: dict, location_name: str) -> tuple[str, str]:
     needs_action = booking["status"] == "pending"
     subject = f"{location_name} — New booking: {booking['customer_name']} ({booking['party_size']} pax)"
-    html = f"""
-<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1a1a1a;">
-  <div style="background:#1a1a1a;padding:20px 24px;border-radius:8px 8px 0 0;">
-    <p style="color:#fff;font-size:18px;font-weight:700;margin:0;">Artcaffe — {location_name}</p>
-  </div>
-  <div style="background:#fff;padding:24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+    html = notification_service.render_email(f"""
     <p style="font-size:15px;color:#374151;">
       {"A party of over " + str(LARGE_PARTY_THRESHOLD) + " has requested a table and needs confirmation." if needs_action else "A new table booking has come in for your branch."}
     </p>
-    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:16px;margin:16px 0;font-size:13px;color:#374151;">
+    <div style="background:#f6f8f6;border:1px solid #e2e7e3;border-radius:10px;padding:14px;margin:14px 0;font-size:13px;color:#374151;">
       <p style="margin:0 0 6px;"><strong>Guest:</strong> {booking['customer_name']} ({booking['phone']}, {booking['email']})</p>
       <p style="margin:0 0 6px;"><strong>Date:</strong> {booking['booking_date']} at {booking['booking_time']}</p>
       <p style="margin:0 0 6px;"><strong>Party size:</strong> {booking['party_size']}</p>
       <p style="margin:0;"><strong>Seating:</strong> {booking['seating_preference'].title()}</p>
     </div>
     <a href="{notification_service.DASHBOARD_URL}/table-bookings"
-       style="display:inline-block;background:#1a1a1a;color:#fff;padding:10px 20px;
-              border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">
+       style="display:inline-block;background:#087f3b;color:#fff;padding:10px 16px;
+              border-radius:8px;text-decoration:none;font-size:13px;font-weight:600;">
       View in Table Bookings
     </a>
-    <p style="font-size:12px;color:#9ca3af;margin-top:24px;">— Artcaffe AI Marketing System</p>
-  </div>
-</div>
-"""
+
+""", heading=f"Artcaffe — {location_name}", category="Table booking", preheader=subject)
     return subject, html
 
 
