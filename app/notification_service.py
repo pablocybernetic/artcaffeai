@@ -34,6 +34,33 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _send_email_multi(to_emails: list[str], subject: str, html: str, attachments: Optional[list] = None) -> bool:
+    """Like _send_email but addresses every recipient in a single email —
+    Resend's `to` field accepts a list — used where several people must
+    see one shared email rather than each getting a separate copy."""
+    api_key = os.environ.get("RESEND_API_KEY") or RESEND_API_KEY
+    from_addr = os.environ.get("NOTIFY_FROM_EMAIL", "noreply@artcaffemarket.co.ke")
+    if not api_key or not to_emails:
+        print(f"[notification_service] RESEND_API_KEY not set or no recipients — skipping combined email", flush=True)
+        return False
+    try:
+        import resend  # type: ignore
+        resend.api_key = api_key
+        payload: dict[str, Any] = {
+            "from": from_addr,
+            "to": to_emails,
+            "subject": subject,
+            "html": render_email(html, heading=subject, category="Marketing update", preheader=subject),
+        }
+        if attachments:
+            payload["attachments"] = attachments
+        resend.Emails.send(payload)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[notification_service] combined email failed to={to_emails}: {exc}", flush=True)
+        return False
+
+
 def _send_email(to_email: str, subject: str, html: str, attachments: Optional[list] = None) -> bool:
     """Fire-and-forget Resend email. Returns True on success.
 
@@ -263,6 +290,60 @@ def _notify_relevant_team(
         flush=True,
     )
     return sent
+
+
+def _notify_relevant_team_combined(
+    sb: Client,
+    *,
+    notif_type: str,
+    subject: str,
+    html: str,
+    role_slugs: list[str] = ["admin", "content_manager"],  # noqa: B006
+    brief_id: Optional[str] = None,
+    content_item_id: Optional[str] = None,
+    payload: Optional[dict] = None,
+) -> int:
+    """Same eligibility + inbox/audit-log bookkeeping as _notify_relevant_team,
+    but sends ONE email addressed to every eligible recipient at once
+    instead of a separate email per recipient — used for table booking
+    admin notifications, where the team wants one shared email rather
+    than N individual copies. Returns 1 if the combined email sent, else 0
+    (per-recipient inbox rows are written regardless of email outcome)."""
+    members = _eligible_team_members(sb, notif_type=notif_type, role_slugs=role_slugs)
+    if not members:
+        print(f"[notification_service] {notif_type} fired (combined). recipients=0 emails_sent=0", flush=True)
+        return 0
+
+    notif_ids = []
+    for m in members:
+        notif_id = _write_team_notification(
+            sb,
+            recipient_id=m["id"],
+            subject=subject,
+            body=html,
+            brief_id=brief_id,
+            content_item_id=content_item_id,
+            notif_type=notif_type,
+        )
+        if notif_id:
+            notif_ids.append(notif_id)
+        _write_agent_notification(sb, notif_type, {
+            **(payload or {}),
+            "recipient_id":    m["id"],
+            "recipient_email": m["email"],
+        })
+
+    emails = [m["email"] for m in members if m.get("email")]
+    sent = _send_email_multi(emails, subject, html)
+    if sent:
+        for notif_id in notif_ids:
+            _mark_notification_sent(sb, notif_id)
+
+    print(
+        f"[notification_service] {notif_type} fired (combined). recipients={len(members)} emails_sent={1 if sent else 0}",
+        flush=True,
+    )
+    return 1 if sent else 0
 
 
 def notify_approval_needed_to_team(

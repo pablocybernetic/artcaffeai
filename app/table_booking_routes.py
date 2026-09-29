@@ -372,11 +372,12 @@ def _resend_branch_email_only(booking: dict, location: dict) -> None:
 
 def _notify_admins_of_booking(booking: dict, location_name: str) -> None:
     """Fans out to every active admin/content_manager who hasn't opted out
-    (team inbox row + audit log + email), same convention as approval_needed
-    and post_scheduled/published. Best-effort — never raises."""
+    (team inbox row + audit log), but sends a single combined email
+    addressing every recipient at once rather than one email per
+    recipient. Best-effort — never raises."""
     try:
         subject, html = _admin_notification_html(booking, location_name)
-        notification_service._notify_relevant_team(
+        notification_service._notify_relevant_team_combined(
             sb,
             notif_type="table_booking_created",
             subject=subject,
