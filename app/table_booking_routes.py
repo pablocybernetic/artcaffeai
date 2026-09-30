@@ -222,11 +222,12 @@ def _customer_sms_text(booking: dict, location_name: str, confirmed: bool, direc
     )
 
 
-def _staff_sms_text(booking: dict, location_name: str) -> str:
+def _staff_sms_text(booking: dict, location_name: str, directions_url: Optional[str] = None) -> str:
+    directions_suffix = f" Directions: {directions_url}" if directions_url else ""
     return (
         f"New table booking ({booking['status']}): {booking['customer_name']}, "
         f"party of {booking['party_size']}, {location_name}, {booking['booking_date']} "
-        f"{booking['booking_time']}. Phone: {booking['phone']}."
+        f"{booking['booking_time']}. Phone: {booking['phone']}.{directions_suffix}"
     )
 
 
@@ -459,7 +460,7 @@ def _send_booking_notifications(
                 try:
                     onfon_sms_connector.send_sms(
                         to_number=phone,
-                        text=_staff_sms_text(booking, location_name),
+                        text=_staff_sms_text(booking, location_name, directions_url),
                         api_key=creds["api_key"],
                         client_id=creds["client_id"],
                         access_key=creds["access_key"],
