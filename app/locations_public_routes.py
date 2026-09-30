@@ -91,6 +91,7 @@ def _serialize_summary(row: dict) -> dict:
         "opening_hours": row.get("opening_hours") or {},
         "services": row.get("services") or [],
         "menu_url": row.get("menu_url"),
+        "accepts_table_booking": row.get("accepts_table_booking", True),
         "google": {
             "maps_url": row.get("google_maps_url"),
             "review_url": row.get("google_review_url"),

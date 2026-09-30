@@ -495,7 +495,7 @@ def create_booking(body: BookingCreate, bg: BackgroundTasks):
 
     loc_res = (
         sb.table("locations")
-        .select("id,name,address,latitude,longitude,google_place_id,branch_email,menu_url")
+        .select("id,name,address,latitude,longitude,google_place_id,branch_email,menu_url,accepts_table_booking")
         .eq("id", body.location_id)
         .eq("status", "active")
         .maybe_single()
@@ -504,6 +504,8 @@ def create_booking(body: BookingCreate, bg: BackgroundTasks):
     if not loc_res or not loc_res.data:
         raise HTTPException(400, "Unknown or inactive location")
     location = loc_res.data
+    if location.get("accepts_table_booking") is False:
+        raise HTTPException(400, "This location isn't accepting table bookings")
 
     status = "confirmed" if body.party_size <= LARGE_PARTY_THRESHOLD else "pending"
     row = {

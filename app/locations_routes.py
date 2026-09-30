@@ -123,6 +123,7 @@ class LocationIn(BaseModel):
     glovo_url: Optional[str] = None
     media_mentions: Optional[list] = None
     branch_email: Optional[str] = None
+    accepts_table_booking: Optional[bool] = True
 
 
 class LocationUpdate(BaseModel):
@@ -173,6 +174,7 @@ class LocationUpdate(BaseModel):
     glovo_url: Optional[str] = None
     media_mentions: Optional[list] = None
     branch_email: Optional[str] = None
+    accepts_table_booking: Optional[bool] = None
 
 
 @router.get("")
