@@ -226,10 +226,11 @@ def _reminder_sms_text(booking: dict, location_name: str, directions_url: Option
     )
 
 
-def _branch_reminder_email_html(booking: dict, location_name: str) -> tuple[str, str]:
-    """Same reminder sent to the customer, but addressed to the branch —
-    a heads-up that this booking is coming up soon, same style as the
-    branch's original new-booking email in table_booking_routes.py."""
+def _staff_reminder_email_html(booking: dict, location_name: str) -> tuple[str, str]:
+    """Same reminder sent to the customer, but addressed to staff — a
+    heads-up that this booking is coming up soon, shared by Customer
+    Care, the branch, and any cc'd admin, same style as the merged
+    new-booking notification in table_booking_routes.py."""
     subject = f"{location_name} — Upcoming booking reminder: {booking['customer_name']} ({booking['party_size']} pax)"
     html = notification_service.render_email(f"""
     <p style="font-size:15px;color:#374151;">Reminder — this booking is coming up soon.</p>
@@ -362,19 +363,29 @@ def _send_reminder(sb: Client, booking: dict, location: dict) -> bool:
         update["reminder_sms_error"] = "SMS credentials not configured"
 
     branch_email = (location or {}).get("branch_email")
-    if branch_email:
+    staff_email = (app_settings.get_setting(sb, _SMS_SETTINGS_KEY, {}) or {}).get("staff_notification_email")
+    to_list = [e for e in (staff_email, branch_email) if e]
+    if to_list:
         try:
-            b_subject, b_html = _branch_reminder_email_html(booking, location_name)
-            b_sent = notification_service._send_email(branch_email, b_subject, b_html, thread_key=booking["id"])
-            update["reminder_branch_email_sent"] = b_sent
+            b_subject, b_html = _staff_reminder_email_html(booking, location_name)
+            b_sent = notification_service._notify_relevant_team_combined_with_extra_to(
+                sb,
+                notif_type="table_booking_created",
+                subject=b_subject,
+                html=b_html,
+                extra_to=to_list,
+                payload={"booking_id": booking["id"], "location_id": booking.get("location_id"), "reminder": True},
+                thread_key=booking["id"],
+            )
+            update["reminder_branch_email_sent"] = bool(b_sent)
             update["reminder_branch_email_error"] = None if b_sent else "Email provider not configured or send failed"
-            any_sent = any_sent or b_sent
+            any_sent = any_sent or bool(b_sent)
         except Exception as exc:  # noqa: BLE001
             update["reminder_branch_email_sent"] = False
             update["reminder_branch_email_error"] = str(exc)[:300]
     else:
         update["reminder_branch_email_sent"] = False
-        update["reminder_branch_email_error"] = "No branch email configured for this location"
+        update["reminder_branch_email_error"] = "No staff or branch email configured"
 
     update["reminder_sent_at"] = _now_utc().isoformat()
     try:

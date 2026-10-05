@@ -137,7 +137,7 @@ def _store_inbound_message(msg: dict) -> Optional[str]:
 def _notify_admins_of_whatsapp_message(msg: dict, contact_id: Optional[str]) -> None:
     """Best-effort admin notification for a new inbound WhatsApp message —
     same generic team-notification fan-out as table_booking_routes.py's
-    _notify_admins_of_booking, so it already respects each admin's own
+    _notify_staff_of_booking, so it already respects each admin's own
     Users → Notifications preference for notif_type "whatsapp_message_received".
     Never raises — a notification failure must never affect webhook
     processing or the stored message."""

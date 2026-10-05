@@ -54,10 +54,13 @@ def _thread_headers(thread_key: Optional[str]) -> dict[str, str]:
 def _send_email_multi(
     to_emails: list[str], subject: str, html: str,
     attachments: Optional[list] = None, thread_key: Optional[str] = None,
+    cc: Optional[list[str]] = None,
 ) -> bool:
     """Like _send_email but addresses every recipient in a single email —
     Resend's `to` field accepts a list — used where several people must
-    see one shared email rather than each getting a separate copy."""
+    see one shared email rather than each getting a separate copy. An
+    optional cc list keeps a wider audience in the loop without putting
+    them on the primary To: line."""
     api_key = os.environ.get("RESEND_API_KEY") or RESEND_API_KEY
     from_addr = os.environ.get("NOTIFY_FROM_EMAIL", "noreply@artcaffemarket.co.ke")
     if not api_key or not to_emails:
@@ -72,6 +75,8 @@ def _send_email_multi(
             "subject": subject,
             "html": render_email(html, heading=subject, category="Marketing update", preheader=subject),
         }
+        if cc:
+            payload["cc"] = cc
         if attachments:
             payload["attachments"] = attachments
         headers = _thread_headers(thread_key)
@@ -374,6 +379,67 @@ def _notify_relevant_team_combined(
 
     print(
         f"[notification_service] {notif_type} fired (combined). recipients={len(members)} emails_sent={1 if sent else 0}",
+        flush=True,
+    )
+    return 1 if sent else 0
+
+
+def _notify_relevant_team_combined_with_extra_to(
+    sb: Client,
+    *,
+    notif_type: str,
+    subject: str,
+    html: str,
+    extra_to: list[str],
+    role_slugs: list[str] = ["admin", "content_manager"],  # noqa: B006
+    brief_id: Optional[str] = None,
+    content_item_id: Optional[str] = None,
+    payload: Optional[dict] = None,
+    thread_key: Optional[str] = None,
+) -> int:
+    """Same eligibility + inbox/audit-log bookkeeping as
+    _notify_relevant_team_combined, but the email's To: line is
+    extra_to (e.g. a shared operational inbox plus a specific branch)
+    with every eligible team member Cc'd, instead of the team being the
+    To: line itself. Used for table booking notifications, where a
+    fixed inbox and the relevant branch should be the primary
+    recipients and the rest of the opted-in team just kept in the loop.
+    Returns 1 if the combined email sent, else 0 — including when
+    extra_to is empty, since there's then no one to put on To:."""
+    members = _eligible_team_members(sb, notif_type=notif_type, role_slugs=role_slugs)
+
+    notif_ids = []
+    for m in members:
+        notif_id = _write_team_notification(
+            sb,
+            recipient_id=m["id"],
+            subject=subject,
+            body=html,
+            brief_id=brief_id,
+            content_item_id=content_item_id,
+            notif_type=notif_type,
+        )
+        if notif_id:
+            notif_ids.append(notif_id)
+        _write_agent_notification(sb, notif_type, {
+            **(payload or {}),
+            "recipient_id":    m["id"],
+            "recipient_email": m["email"],
+        })
+
+    to_list = [e for e in extra_to if e]
+    if not to_list:
+        print(f"[notification_service] {notif_type} fired (combined, no primary recipients) — skipping send", flush=True)
+        return 0
+
+    cc_list = [m["email"] for m in members if m.get("email") and m["email"] not in to_list]
+    sent = _send_email_multi(to_list, subject, html, thread_key=thread_key, cc=cc_list or None)
+    if sent:
+        for notif_id in notif_ids:
+            _mark_notification_sent(sb, notif_id)
+
+    print(
+        f"[notification_service] {notif_type} fired (combined, to={len(to_list)} cc={len(cc_list)}) emails_sent={1 if sent else 0}",
         flush=True,
     )
     return 1 if sent else 0
