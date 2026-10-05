@@ -263,7 +263,7 @@ def _send_cancellation_notification(booking: dict, location: dict) -> None:
 
     subject, html = _cancellation_email_html(booking, location_name)
     try:
-        sent = notification_service._send_email(booking["email"], subject, html)
+        sent = notification_service._send_email(booking["email"], subject, html, thread_key=booking["id"])
         update["cancellation_email_sent"] = sent
         update["cancellation_email_error"] = None if sent else "Email provider not configured or send failed"
     except Exception as exc:  # noqa: BLE001
@@ -357,7 +357,7 @@ def _resend_branch_email_only(booking: dict, location: dict) -> None:
     if branch_email:
         try:
             subject, html = _branch_email_html(booking, location_name)
-            sent = notification_service._send_email(branch_email, subject, html)
+            sent = notification_service._send_email(branch_email, subject, html, thread_key=booking["id"])
             update["branch_email_sent"] = sent
             update["branch_email_error"] = None if sent else "Email provider not configured or send failed"
         except Exception as exc:  # noqa: BLE001
@@ -384,6 +384,7 @@ def _notify_admins_of_booking(booking: dict, location_name: str) -> None:
             subject=subject,
             html=html,
             payload={"booking_id": booking["id"], "location_id": booking["location_id"], "status": booking["status"]},
+            thread_key=booking["id"],
         )
     except Exception as exc:  # noqa: BLE001
         print(f"[table_booking_routes] admin notify failed: {exc}", flush=True)
@@ -411,7 +412,9 @@ def _send_booking_notifications(
 
     subject, html = _customer_email_html(booking, location_name, confirmed, directions_url, calendar_url, menu_url)
     try:
-        sent = notification_service._send_email(booking["email"], subject, html, attachments=ics_attachment)
+        sent = notification_service._send_email(
+            booking["email"], subject, html, attachments=ics_attachment, thread_key=booking["id"],
+        )
         update["email_sent"] = sent
         update["email_error"] = None if sent else "Email provider not configured or send failed"
     except Exception as exc:  # noqa: BLE001
@@ -423,7 +426,7 @@ def _send_booking_notifications(
     if branch_email:
         try:
             b_subject, b_html = _branch_email_html(booking, location_name)
-            b_sent = notification_service._send_email(branch_email, b_subject, b_html)
+            b_sent = notification_service._send_email(branch_email, b_subject, b_html, thread_key=booking["id"])
             update["branch_email_sent"] = b_sent
             update["branch_email_error"] = None if b_sent else "Email provider not configured or send failed"
         except Exception as exc:  # noqa: BLE001

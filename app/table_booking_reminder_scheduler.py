@@ -330,7 +330,9 @@ def _send_reminder(sb: Client, booking: dict, location: dict) -> bool:
 
     subject, html = _reminder_email_html(booking, location_name, directions_url, calendar_url, menu_url)
     try:
-        sent = notification_service._send_email(booking["email"], subject, html, attachments=ics_attachment)
+        sent = notification_service._send_email(
+            booking["email"], subject, html, attachments=ics_attachment, thread_key=booking["id"],
+        )
         update["reminder_email_sent"] = sent
         update["reminder_email_error"] = None if sent else "Email provider not configured or send failed"
         any_sent = any_sent or sent
@@ -363,7 +365,7 @@ def _send_reminder(sb: Client, booking: dict, location: dict) -> bool:
     if branch_email:
         try:
             b_subject, b_html = _branch_reminder_email_html(booking, location_name)
-            b_sent = notification_service._send_email(branch_email, b_subject, b_html)
+            b_sent = notification_service._send_email(branch_email, b_subject, b_html, thread_key=booking["id"])
             update["reminder_branch_email_sent"] = b_sent
             update["reminder_branch_email_error"] = None if b_sent else "Email provider not configured or send failed"
             any_sent = any_sent or b_sent

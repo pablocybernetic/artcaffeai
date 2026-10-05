@@ -34,7 +34,27 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _send_email_multi(to_emails: list[str], subject: str, html: str, attachments: Optional[list] = None) -> bool:
+def _thread_headers(thread_key: Optional[str]) -> dict[str, str]:
+    """References/In-Reply-To headers that make every email sharing the
+    same thread_key (e.g. a booking id) group into one conversation in
+    the recipient's mailbox, instead of each notification — confirmation,
+    reminder, cancellation, a resend — showing up as its own separate
+    thread. The referenced id is a synthetic anchor (no email actually
+    carries it as its own Message-ID); mail clients thread on a shared
+    References/In-Reply-To value regardless of whether it corresponds to
+    a message really in the mailbox, so this works without risking a
+    duplicate Message-ID anywhere."""
+    if not thread_key:
+        return {}
+    domain = (os.environ.get("NOTIFY_FROM_EMAIL", "noreply@artcaffemarket.co.ke")).split("@")[-1]
+    anchor = f"<{thread_key}@{domain}>"
+    return {"References": anchor, "In-Reply-To": anchor}
+
+
+def _send_email_multi(
+    to_emails: list[str], subject: str, html: str,
+    attachments: Optional[list] = None, thread_key: Optional[str] = None,
+) -> bool:
     """Like _send_email but addresses every recipient in a single email —
     Resend's `to` field accepts a list — used where several people must
     see one shared email rather than each getting a separate copy."""
@@ -54,6 +74,9 @@ def _send_email_multi(to_emails: list[str], subject: str, html: str, attachments
         }
         if attachments:
             payload["attachments"] = attachments
+        headers = _thread_headers(thread_key)
+        if headers:
+            payload["headers"] = headers
         resend.Emails.send(payload)
         return True
     except Exception as exc:  # noqa: BLE001
@@ -61,13 +84,19 @@ def _send_email_multi(to_emails: list[str], subject: str, html: str, attachments
         return False
 
 
-def _send_email(to_email: str, subject: str, html: str, attachments: Optional[list] = None) -> bool:
+def _send_email(
+    to_email: str, subject: str, html: str,
+    attachments: Optional[list] = None, thread_key: Optional[str] = None,
+) -> bool:
     """Fire-and-forget Resend email. Returns True on success.
 
     attachments, when given, is Resend's own attachment shape — a list
     of {filename, content, content_type?} dicts, content being a byte
     list (list(some_bytes)) or a base64 string. Used by table booking's
-    .ics calendar invite; every other call site omits it."""
+    .ics calendar invite; every other call site omits it.
+
+    thread_key, when given (e.g. a booking id), threads this email with
+    every other email sharing the same key — see _thread_headers."""
     api_key = os.environ.get("RESEND_API_KEY") or RESEND_API_KEY
     from_addr = os.environ.get("NOTIFY_FROM_EMAIL", "noreply@artcaffemarket.co.ke")
     if not api_key:
@@ -84,6 +113,9 @@ def _send_email(to_email: str, subject: str, html: str, attachments: Optional[li
         }
         if attachments:
             payload["attachments"] = attachments
+        headers = _thread_headers(thread_key)
+        if headers:
+            payload["headers"] = headers
         resend.Emails.send(payload)
         return True
     except Exception as exc:  # noqa: BLE001
@@ -302,6 +334,7 @@ def _notify_relevant_team_combined(
     brief_id: Optional[str] = None,
     content_item_id: Optional[str] = None,
     payload: Optional[dict] = None,
+    thread_key: Optional[str] = None,
 ) -> int:
     """Same eligibility + inbox/audit-log bookkeeping as _notify_relevant_team,
     but sends ONE email addressed to every eligible recipient at once
@@ -334,7 +367,7 @@ def _notify_relevant_team_combined(
         })
 
     emails = [m["email"] for m in members if m.get("email")]
-    sent = _send_email_multi(emails, subject, html)
+    sent = _send_email_multi(emails, subject, html, thread_key=thread_key)
     if sent:
         for notif_id in notif_ids:
             _mark_notification_sent(sb, notif_id)
