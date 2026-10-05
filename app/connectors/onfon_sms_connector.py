@@ -12,10 +12,35 @@ cURL the credentials arrived with only showed the body, which would have
 from __future__ import annotations
 
 import re
+import unicodedata
 
 import httpx
 
 SEND_URL = "https://api.onfonmedia.co.ke/v1/sms/SendBulkSMS"
+
+_SMART_PUNCTUATION = {
+    "‘": "'", "’": "'", "“": '"', "”": '"',
+    "–": "-", "—": "-", "…": "...",
+}
+
+
+def _to_sms_safe_text(text: str) -> str:
+    """Transliterate to plain ASCII before sending via Onfon.
+
+    Accented characters in location names ("Artcaffé") and guest names
+    (e.g. "Moshé") were arriving on the handset corrupted (an "é" turning
+    into stray characters like "Ac") even though the identical text
+    renders perfectly in HTML email — this isn't a bug in our own string
+    handling, something downstream in Onfon's gateway mangles non-ASCII
+    bytes. Stripping accents to their closest ASCII letter (and common
+    "smart" punctuation to its plain equivalent) sidesteps that
+    entirely, rather than depending on the gateway to handle UTF-8
+    correctly."""
+    for smart, plain in _SMART_PUNCTUATION.items():
+        text = text.replace(smart, plain)
+    decomposed = unicodedata.normalize("NFKD", text)
+    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return stripped.encode("ascii", "ignore").decode("ascii")
 
 
 def _normalize_kenyan_phone(phone: str) -> str:
@@ -52,7 +77,7 @@ def send_sms(
         headers={"Content-Type": "application/json", "AccessKey": access_key},
         json={
             "SenderId": sender_id,
-            "MessageParameters": [{"Number": _normalize_kenyan_phone(to_number), "Text": text}],
+            "MessageParameters": [{"Number": _normalize_kenyan_phone(to_number), "Text": _to_sms_safe_text(text)}],
             "ApiKey": api_key,
             "ClientId": client_id,
         },
